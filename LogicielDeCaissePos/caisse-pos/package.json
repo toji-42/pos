@@ -1,0 +1,47 @@
+{
+  "name": "caisse-pos",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "start:stable": "expo start --localhost --clear --port 8082",
+    "tablet:tunnel": "expo start --tunnel --clear",
+    "android": "expo start --android --localhost --clear --port 8082",
+    "android:stable": "expo start --android --localhost --clear --port 8082",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "build": "expo export --platform android",
+    "build:android": "expo export --platform android",
+    "build:web": "expo export --platform web"
+  },
+  "dependencies": {
+    "@react-navigation/native": "^7.1.28",
+    "@react-navigation/native-stack": "^7.12.0",
+    "expo": "~54.0.33",
+    "expo-clipboard": "~8.0.8",
+    "expo-crypto": "~15.0.8",
+    "expo-document-picker": "~14.0.8",
+    "expo-file-system": "~19.0.21",
+    "expo-image": "~3.0.11",
+    "expo-image-picker": "~17.0.10",
+    "expo-network": "~8.0.8",
+    "expo-print": "~15.0.8",
+    "expo-sharing": "~14.0.8",
+    "expo-sqlite": "~16.0.10",
+    "expo-status-bar": "~3.0.9",
+    "expo-web-browser": "~15.0.10",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-gesture-handler": "~2.28.0",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-screens": "~4.16.0"
+  },
+  "devDependencies": {
+    "@expo/ngrok": "^4.1.3",
+    "@types/react": "~19.1.0",
+    "eas-cli": "^18.0.1",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
