@@ -17,6 +17,8 @@ import {
   OrderType,
   PrintJobRecord,
   PrintJobStatus,
+  normalizeTicketCustomization,
+  DEFAULT_TICKET_CUSTOMIZATION,
   PrinterSettings,
   Product,
   ProductCategory,
@@ -34,8 +36,10 @@ const DEFAULT_PRINTER_SETTINGS: PrinterSettings = {
   kitchenPrinterUrl: '',
   usbPrinterId: '',
   usbPrinterName: '',
+  cashDrawerEnabled: true,
   serviceTicketEnabled: true,
   nightSurchargePercent: 0,
+  ticketCustomization: { ...DEFAULT_TICKET_CUSTOMIZATION },
 };
 
 const ensureMenuPriceColumn = async (db: SQLite.SQLiteDatabase) => {
@@ -92,6 +96,15 @@ const ensureOrderColumn = async (db: SQLite.SQLiteDatabase, columnName: string, 
   }
 };
 
+const ensureClosureColumn = async (db: SQLite.SQLiteDatabase, columnName: string, columnSql: string) => {
+  const columns = await db.getAllAsync<{ name: string }>("PRAGMA table_info('closures')");
+  const hasColumn = columns.some((col) => col.name === columnName);
+
+  if (!hasColumn) {
+    await db.execAsync(`ALTER TABLE closures ADD COLUMN ${columnSql}`);
+  }
+};
+
 const peekNextTicketNumber = async (db: SQLite.SQLiteDatabase) => {
   const row = await db.getFirstAsync<{ value: string }>(`SELECT value FROM app_settings WHERE key = 'order_sequence'`);
   const current = Number(row?.value ?? '0');
@@ -136,6 +149,7 @@ const buildOrderHash = async (payload: string) =>
   Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, payload);
 
 const Z_LAST_CLOSED_AT_KEY = 'z_last_closed_at';
+const FORCE_ALL_PRODUCTS_ACTIVE_KEY = 'products_forced_active_v1';
 
 const getCurrentPeriodStart = async (db: SQLite.SQLiteDatabase) => {
   const row = await db.getFirstAsync<{ value: string }>(
@@ -147,11 +161,11 @@ const getCurrentPeriodStart = async (db: SQLite.SQLiteDatabase) => {
 
 // ── TVA computation helpers ──────────────────────────────────────────────
 const SNAPSHOT_TAX_RATE_SUR_PLACE: Record<string, number> = {
-  burgers: 0.1, snacks: 0.1, desserts: 0.1,
+  burgers: 0.1, snacks: 0.1, salades: 0.1, desserts: 0.1,
   boissons: 0.1, accompagnements: 0.1, sauces: 0.1,
 };
 const SNAPSHOT_TAX_RATE_A_EMPORTER: Record<string, number> = {
-  burgers: 0.1, snacks: 0.1, desserts: 0.1,
+  burgers: 0.1, snacks: 0.1, salades: 0.1, desserts: 0.1,
   boissons: 0.055, accompagnements: 0.1, sauces: 0.1,
 };
 const snapshotTaxRate = (cat: string, ot: string) =>
@@ -285,6 +299,29 @@ const getSeedMenuPrice = (slug: string, fallback?: number | null) => {
   return null;
 };
 
+const CATALOG_SYNC_SLUGS = new Set([
+  'croq_s',
+  'crown_original',
+  'crown_spicy',
+  'le_plena',
+  'racls_beef',
+  'racls_chicken',
+  'stacks_beef',
+  'stacks_chicken',
+  'sakitori_x3',
+  'sakitori_x6',
+  'chicken_fil_s_thai',
+  'chicken_fil_s_bbq',
+  'melty_cookie_s',
+  'delice_glace',
+  'sundae',
+  'cone_glace',
+  'le_mont_blanc_vanille',
+  'mont_blanc_chocolat',
+  'magic_waffle_pomme',
+  'salade_simple',
+]);
+
 export const initDatabase = async () => {
   const db = await dbPromise;
 
@@ -341,6 +378,9 @@ export const initDatabase = async () => {
       revenue REAL NOT NULL,
       payment_breakdown_json TEXT NOT NULL,
       last_ticket_number INTEGER NOT NULL,
+      opening_cash REAL,
+      cash_counted REAL,
+      cash_variance REAL,
       previous_signature_hash TEXT,
       signature_hash TEXT NOT NULL
     );
@@ -379,6 +419,9 @@ export const initDatabase = async () => {
   await ensureOrderColumn(db, 'previous_hash', 'previous_hash TEXT');
   await ensureOrderColumn(db, 'entry_hash', 'entry_hash TEXT');
   await ensureOrderColumn(db, 'order_type', "order_type TEXT NOT NULL DEFAULT 'sur_place'");
+  await ensureClosureColumn(db, 'opening_cash', 'opening_cash REAL');
+  await ensureClosureColumn(db, 'cash_counted', 'cash_counted REAL');
+  await ensureClosureColumn(db, 'cash_variance', 'cash_variance REAL');
   await ensureSendToSalleColumn(db);
 
   await db.runAsync(
@@ -484,6 +527,42 @@ export const initDatabase = async () => {
     }
   }
 
+  // Sync selected catalog items (name/price/status/image) for existing and fresh databases.
+  for (const product of DEFAULT_PRODUCTS) {
+    if (!CATALOG_SYNC_SLUGS.has(product.slug)) {
+      continue;
+    }
+    const seedMenuPrice = getSeedMenuPrice(product.slug, product.menuPrice ?? null);
+    await db.runAsync(
+      `
+        UPDATE products
+        SET
+          name = ?,
+          price = ?,
+          category = ?,
+          send_to_kitchen = ?,
+          send_to_salle = ?,
+          active = ?,
+          image_key = ?,
+          menu_price = ?,
+          menu_supplement = ?
+        WHERE slug = ?
+      `,
+      [
+        product.name,
+        product.price,
+        product.category,
+        product.sendToKitchen ? 1 : 0,
+        (product.sendToSalle ?? true) ? 1 : 0,
+        product.active ? 1 : 0,
+        product.imageKey ?? '',
+        seedMenuPrice,
+        product.menuSupplement ?? null,
+        product.slug,
+      ],
+    );
+  }
+
   for (const [slug, price] of Object.entries(MENU_PRICES_BY_SLUG)) {
     await db.runAsync(`UPDATE products SET menu_price = ? WHERE slug = ?`, [price, slug]);
   }
@@ -496,6 +575,24 @@ export const initDatabase = async () => {
         [product.menuSupplement, product.slug],
       );
     }
+  }
+
+  // One-shot migration: ensure all existing products are active.
+  // Kept one-shot so future manual stock toggles still work normally.
+  const activeMigrationDone = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM app_settings WHERE key = ?`,
+    [FORCE_ALL_PRODUCTS_ACTIVE_KEY],
+  );
+  if (!activeMigrationDone?.value) {
+    await db.runAsync(`UPDATE products SET active = 1`);
+    await db.runAsync(
+      `
+        INSERT INTO app_settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `,
+      [FORCE_ALL_PRODUCTS_ACTIVE_KEY, '1'],
+    );
   }
 };
 
@@ -512,6 +609,7 @@ const normalizeCategory = (category: string): ProductCategory => {
   if (normalized === 'boissons') return 'boissons';
   if (normalized === 'desserts') return 'desserts';
   if (normalized === 'snacks') return 'snacks';
+  if (normalized === 'salades') return 'salades';
   if (normalized === 'accompagnements') return 'accompagnements';
   if (normalized === 'sauces') return 'sauces';
   return 'burgers';
@@ -1240,7 +1338,6 @@ export const closeCurrentZPeriod = async (closedBy: string): Promise<ClosureReco
   );
   const previousSignatureHash = previousRow?.signature_hash ?? 'GENESIS';
   const closedAt = new Date().toISOString();
-
   const payload = JSON.stringify({
     periodStart: snapshot.periodStart,
     periodEnd: snapshot.periodEnd,
@@ -1264,9 +1361,12 @@ export const closeCurrentZPeriod = async (closedBy: string): Promise<ClosureReco
         revenue,
         payment_breakdown_json,
         last_ticket_number,
+        opening_cash,
+        cash_counted,
+        cash_variance,
         previous_signature_hash,
         signature_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
       snapshot.periodStart,
@@ -1277,6 +1377,9 @@ export const closeCurrentZPeriod = async (closedBy: string): Promise<ClosureReco
       snapshot.revenue,
       JSON.stringify(snapshot.paymentBreakdown),
       snapshot.lastTicketNumber,
+      null,
+      null,
+      null,
       previousSignatureHash,
       signatureHash,
     ],
@@ -1481,6 +1584,9 @@ export const getRecentClosures = async (limit = 20): Promise<ClosureRecord[]> =>
     revenue: number;
     payment_breakdown_json: string;
     last_ticket_number: number;
+    opening_cash: number | null;
+    cash_counted: number | null;
+    cash_variance: number | null;
     previous_signature_hash: string | null;
     signature_hash: string;
   }>(
@@ -1495,6 +1601,9 @@ export const getRecentClosures = async (limit = 20): Promise<ClosureRecord[]> =>
         revenue,
         payment_breakdown_json,
         last_ticket_number,
+        opening_cash,
+        cash_counted,
+        cash_variance,
         previous_signature_hash,
         signature_hash
       FROM closures
@@ -1546,6 +1655,9 @@ export const getRecentClosures = async (limit = 20): Promise<ClosureRecord[]> =>
       revenue: Number(row.revenue),
       paymentBreakdown: parsePaymentBreakdownJson(row.payment_breakdown_json),
       lastTicketNumber: Number(row.last_ticket_number),
+      openingCash: row.opening_cash == null ? undefined : Number(row.opening_cash),
+      cashCounted: row.cash_counted == null ? undefined : Number(row.cash_counted),
+      cashVariance: row.cash_variance == null ? undefined : Number(row.cash_variance),
       previousSignatureHash: row.previous_signature_hash ?? undefined,
       signatureHash: row.signature_hash,
       taxBreakdown,
@@ -1681,6 +1793,9 @@ export const runIntegrityAudit = async (): Promise<AuditReport> => {
     revenue: number;
     payment_breakdown_json: string;
     last_ticket_number: number;
+    opening_cash: number | null;
+    cash_counted: number | null;
+    cash_variance: number | null;
     previous_signature_hash: string | null;
     signature_hash: string;
   }>(
@@ -1695,6 +1810,9 @@ export const runIntegrityAudit = async (): Promise<AuditReport> => {
         revenue,
         payment_breakdown_json,
         last_ticket_number,
+        opening_cash,
+        cash_counted,
+        cash_variance,
         previous_signature_hash,
         signature_hash
       FROM closures
@@ -1725,6 +1843,9 @@ export const runIntegrityAudit = async (): Promise<AuditReport> => {
       revenue: Number(row.revenue),
       paymentBreakdown: parsePaymentBreakdownJson(row.payment_breakdown_json),
       lastTicketNumber: Number(row.last_ticket_number),
+      ...(row.opening_cash == null ? {} : { openingCash: Number(row.opening_cash) }),
+      ...(row.cash_counted == null ? {} : { cashCounted: Number(row.cash_counted) }),
+      ...(row.cash_variance == null ? {} : { cashVariance: Number(row.cash_variance) }),
     });
     const computedSignature = await buildOrderHash(`${prev}|${payload}`);
 
@@ -1765,6 +1886,9 @@ export const buildLegalClosureArchive = async (closureId?: number): Promise<Lega
       revenue: number;
       payment_breakdown_json: string;
       last_ticket_number: number;
+      opening_cash: number | null;
+      cash_counted: number | null;
+      cash_variance: number | null;
       previous_signature_hash: string | null;
       signature_hash: string;
     }>(
@@ -1779,6 +1903,9 @@ export const buildLegalClosureArchive = async (closureId?: number): Promise<Lega
             revenue,
             payment_breakdown_json,
             last_ticket_number,
+            opening_cash,
+            cash_counted,
+            cash_variance,
             previous_signature_hash,
             signature_hash
           FROM closures
@@ -1797,6 +1924,9 @@ export const buildLegalClosureArchive = async (closureId?: number): Promise<Lega
       revenue: number;
       payment_breakdown_json: string;
       last_ticket_number: number;
+      opening_cash: number | null;
+      cash_counted: number | null;
+      cash_variance: number | null;
       previous_signature_hash: string | null;
       signature_hash: string;
     }>(
@@ -1811,6 +1941,9 @@ export const buildLegalClosureArchive = async (closureId?: number): Promise<Lega
             revenue,
             payment_breakdown_json,
             last_ticket_number,
+            opening_cash,
+            cash_counted,
+            cash_variance,
             previous_signature_hash,
             signature_hash
           FROM closures
@@ -1883,6 +2016,9 @@ export const buildLegalClosureArchive = async (closureId?: number): Promise<Lega
     revenue: Number(closure.revenue),
     paymentBreakdown: parsePaymentBreakdownJson(closure.payment_breakdown_json),
     lastTicketNumber: Number(closure.last_ticket_number),
+    openingCash: closure.opening_cash == null ? undefined : Number(closure.opening_cash),
+    cashCounted: closure.cash_counted == null ? undefined : Number(closure.cash_counted),
+    cashVariance: closure.cash_variance == null ? undefined : Number(closure.cash_variance),
     previousSignatureHash: closure.previous_signature_hash ?? undefined,
     signatureHash: closure.signature_hash,
   };
@@ -2254,6 +2390,9 @@ export const getPrinterSettings = async (): Promise<PrinterSettings> => {
       if (row.key === 'usb_printer_name') {
         acc.usbPrinterName = row.value;
       }
+      if (row.key === 'cash_drawer_enabled') {
+        acc.cashDrawerEnabled = row.value === '1';
+      }
       if (row.key === 'service_ticket_enabled') {
         acc.serviceTicketEnabled = row.value === '1';
       }
@@ -2261,12 +2400,24 @@ export const getPrinterSettings = async (): Promise<PrinterSettings> => {
         const parsed = parseFloat(row.value);
         acc.nightSurchargePercent = Number.isFinite(parsed) ? parsed : 0;
       }
+      if (row.key === 'ticket_customization_json') {
+        try {
+          const parsed = JSON.parse(row.value) as Partial<PrinterSettings['ticketCustomization']> | null;
+          acc.ticketCustomization = normalizeTicketCustomization(parsed);
+        } catch {
+          acc.ticketCustomization = { ...DEFAULT_TICKET_CUSTOMIZATION };
+        }
+      }
 
       return acc;
     },
-    { ...DEFAULT_PRINTER_SETTINGS },
+    {
+      ...DEFAULT_PRINTER_SETTINGS,
+      ticketCustomization: { ...DEFAULT_PRINTER_SETTINGS.ticketCustomization },
+    },
   );
 
+  settings.ticketCustomization = normalizeTicketCustomization(settings.ticketCustomization);
   return settings;
 };
 
@@ -2310,6 +2461,13 @@ export const savePrinterSettings = async (settings: PrinterSettings) => {
 
   await db.runAsync(
     `INSERT INTO app_settings (key, value)
+     VALUES ('cash_drawer_enabled', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [settings.cashDrawerEnabled ? '1' : '0'],
+  );
+
+  await db.runAsync(
+    `INSERT INTO app_settings (key, value)
      VALUES ('service_ticket_enabled', ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     [settings.serviceTicketEnabled ? '1' : '0'],
@@ -2320,6 +2478,13 @@ export const savePrinterSettings = async (settings: PrinterSettings) => {
      VALUES ('night_surcharge_percent', ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     [String(settings.nightSurchargePercent ?? 0)],
+  );
+
+  await db.runAsync(
+    `INSERT INTO app_settings (key, value)
+     VALUES ('ticket_customization_json', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [JSON.stringify(normalizeTicketCustomization(settings.ticketCustomization))],
   );
 
   await db.runAsync(
@@ -2369,7 +2534,12 @@ export const getCaisseOpenState = async (): Promise<CaisseOpenState> => {
   );
   if (row?.value) {
     try {
-      return JSON.parse(row.value);
+      const parsed = JSON.parse(row.value) as Partial<CaisseOpenState> | null;
+      return {
+        isOpen: Boolean(parsed?.isOpen),
+        openedAt: typeof parsed?.openedAt === 'string' ? parsed.openedAt : null,
+        openedBy: typeof parsed?.openedBy === 'string' ? parsed.openedBy : null,
+      };
     } catch {
       // corrupted – treat as closed
     }

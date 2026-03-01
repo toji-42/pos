@@ -1,4 +1,11 @@
-import { CartItem, ClosureSnapshot, OrderType, PrinterSettings, TaxLine } from '../types';
+import {
+  CartItem,
+  ClosureSnapshot,
+  OrderType,
+  PrinterSettings,
+  TaxLine,
+  TicketCustomization,
+} from '../types';
 import { generateCashTicketXml, generateKitchenTicketXml, generateServiceTicketXml } from './ticketBuilder';
 import { isUsbPrinterUrl, openUsbDrawerByUrl, printUsbTestByUrl, printUsbTicketByUrl } from './usbPrinter';
 
@@ -23,6 +30,7 @@ export type PrintPayload = {
   orderType?: OrderType;
   ticketNumber?: number | string;
   isDuplicate?: boolean;
+  ticketCustomization?: TicketCustomization;
 };
 
 export type EpsonDiscoveryItem = {
@@ -73,17 +81,20 @@ const paymentMethodLabel = (value?: string) => {
 };
 
 const isKitchenTicketProduct = (item: CartItem['product']) =>
-  item.sendToKitchen && (item.category === 'burgers' || item.category === 'snacks');
+  item.sendToKitchen && (item.category === 'burgers' || item.category === 'snacks' || item.category === 'salades');
+
+const kitchenItemLabel = (item: CartItem['product']) =>
+  item.name;
 
 const buildKitchenItems = (payload: PrintPayload) =>
   payload.cartItems.flatMap((item) => {
     if (item.kind === 'menu' && item.menuItems?.length) {
       return item.menuItems
         .filter((mi) => isKitchenTicketProduct(mi.product))
-        .map((mi) => `${item.quantity} x ${mi.product.name}`);
+        .map((mi) => `${item.quantity} x ${kitchenItemLabel(mi.product)}`);
     }
     if (isKitchenTicketProduct(item.product)) {
-      return [`${item.quantity} x ${item.product.name}`];
+      return [`${item.quantity} x ${kitchenItemLabel(item.product)}`];
     }
     return [] as string[];
   });
@@ -363,42 +374,29 @@ export const sendPreparedPrintJob = async (
   return sendTicketToConfiguredPrinter(printerUrl, requestXml, ticketText ?? '', options);
 };
 
-export const buildCashTicketDocument = (payload: PrintPayload): PreparedPrintJob => {
-  const { xml, text } = generateCashTicketXml({
-    cartItems: payload.cartItems,
-    tableLabel: payload.tableLabel,
-    note: payload.note,
-    total: payload.total,
-    paymentMethod: payload.paymentMethod,
-    seller: payload.seller,
-    taxLines: payload.taxLines,
-    totalHt: payload.totalHt,
-    discountAmount: payload.discountAmount,
-    surchargeAmount: payload.surchargeAmount,
-    surchargePercent: payload.surchargePercent,
-    orderType: payload.orderType,
-    ticketNumber: payload.ticketNumber,
-    isDuplicate: payload.isDuplicate,
-  });
+const applySettingsToPayload = (
+  payload: PrintPayload,
+  settings?: Pick<PrinterSettings, 'ticketCustomization'>,
+): PrintPayload => ({
+  ...payload,
+  ticketCustomization: payload.ticketCustomization ?? settings?.ticketCustomization,
+});
+
+export const buildCashTicketDocument = (
+  payload: PrintPayload,
+  settings?: Pick<PrinterSettings, 'ticketCustomization'>,
+): PreparedPrintJob => {
+  const effectivePayload = applySettingsToPayload(payload, settings);
+  const { xml, text } = generateCashTicketXml(effectivePayload);
   return { channel: 'cash', printerUrl: '', xml, ticketText: text };
 };
 
-export const buildServiceTicketDocument = (payload: PrintPayload): PreparedPrintJob | null => {
-  const { xml, text } = generateServiceTicketXml({
-    cartItems: payload.cartItems,
-    tableLabel: payload.tableLabel,
-    note: payload.note,
-    total: payload.total,
-    paymentMethod: payload.paymentMethod,
-    seller: payload.seller,
-    taxLines: payload.taxLines,
-    totalHt: payload.totalHt,
-    discountAmount: payload.discountAmount,
-    surchargeAmount: payload.surchargeAmount,
-    surchargePercent: payload.surchargePercent,
-    orderType: payload.orderType,
-    ticketNumber: payload.ticketNumber,
-  });
+export const buildServiceTicketDocument = (
+  payload: PrintPayload,
+  settings?: Pick<PrinterSettings, 'ticketCustomization'>,
+): PreparedPrintJob | null => {
+  const effectivePayload = applySettingsToPayload(payload, settings);
+  const { xml, text } = generateServiceTicketXml(effectivePayload);
   if (!xml) return null;
   return { channel: 'service', printerUrl: '', xml, ticketText: text };
 };
@@ -410,19 +408,8 @@ export const buildKitchenTicketDocuments = (
   const printerUrl = settings.kitchenPrinterUrl.trim();
   if (!printerUrl) return [];
 
-  const { xml, text } = generateKitchenTicketXml({
-    cartItems: payload.cartItems,
-    tableLabel: payload.tableLabel,
-    note: payload.note,
-    total: payload.total,
-    paymentMethod: payload.paymentMethod,
-    seller: payload.seller,
-    taxLines: payload.taxLines,
-    totalHt: payload.totalHt,
-    discountAmount: payload.discountAmount,
-    orderType: payload.orderType,
-    ticketNumber: payload.ticketNumber,
-  });
+  const effectivePayload = applySettingsToPayload(payload, settings);
+  const { xml, text } = generateKitchenTicketXml(effectivePayload);
   if (!xml.trim()) return [];
   return [{ channel: 'kitchen', printerUrl, xml, ticketText: text }];
 };
@@ -432,7 +419,7 @@ export const printCashTicket = async (
   payload: PrintPayload,
   options: EpsonSendOptions = {},
 ): Promise<PrintResult> => {
-  const doc = buildCashTicketDocument(payload);
+  const doc = buildCashTicketDocument(payload, settings);
   return sendTicketToConfiguredPrinter(settings.cashPrinterUrl, doc.xml, doc.ticketText, options);
 };
 
@@ -480,7 +467,7 @@ export const printServiceTicket = async (
   payload: PrintPayload,
   options: EpsonSendOptions = {},
 ): Promise<PrintResult> => {
-  const doc = buildServiceTicketDocument(payload);
+  const doc = buildServiceTicketDocument(payload, settings);
   if (!doc) {
     return { ok: true, message: 'Aucun article salle à imprimer.' };
   }
@@ -496,7 +483,6 @@ export const buildKitchenTicketText = (payload: PrintPayload) => {
     payload.tableLabel ? `Table: ${payload.tableLabel}` : '',
     `Heure: ${new Date().toLocaleTimeString('fr-FR')}`,
     ...kitchenItems,
-    payload.note ? `Note: ${payload.note}` : '',
     `Serveur: ${payload.seller}`,
   ]
     .filter(Boolean)

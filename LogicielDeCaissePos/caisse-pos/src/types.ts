@@ -5,7 +5,7 @@ export type UserSession = {
   role: Role;
 };
 
-export type ProductCategory = 'burgers' | 'snacks' | 'desserts' | 'boissons' | 'accompagnements' | 'sauces';
+export type ProductCategory = 'burgers' | 'snacks' | 'salades' | 'desserts' | 'boissons' | 'accompagnements' | 'sauces';
 
 export type Product = {
   id: string;
@@ -55,7 +55,7 @@ export type MenuItemSelection = {
 
 export type CartItemKind = 'product' | 'menu';
 
-export type MenuFlowType = 'menu_burgers' | 'menu_tex_mex' | 'menu_edition_limitee' | 'menu_kids';
+export type MenuFlowType = 'menu_burgers' | 'menu_tex_mex' | 'menu_salade' | 'menu_edition_limitee' | 'menu_kids';
 
 /** Mode de consommation – détermine les taux de TVA applicables */
 export type OrderType = 'sur_place' | 'a_emporter';
@@ -73,15 +73,82 @@ export type CartItem = {
 
 export type PrintMode = 'network_dual' | 'usb_single';
 
+export type TicketCustomization = {
+  businessName: string;
+  businessAddress: string;
+  businessSiret: string;
+  businessTvaIntra: string;
+  businessPhone: string;
+  footerLine1: string;
+  footerLine2: string;
+  showLogo: boolean;
+  headerBold: boolean;
+  footerBold: boolean;
+  showSeller: boolean;
+  showTable: boolean;
+  showPaymentLine: boolean;
+  showTaxTable: boolean;
+  compactMode: boolean;
+};
+
+const clampTicketText = (value: unknown, maxLength = 120) => {
+  const asString = typeof value === 'string' ? value : '';
+  return asString.replace(/\s+/g, ' ').trim().slice(0, maxLength);
+};
+
+const toBool = (value: unknown, fallback: boolean) => (
+  typeof value === 'boolean' ? value : fallback
+);
+
+export const DEFAULT_TICKET_CUSTOMIZATION: TicketCustomization = {
+  businessName: 'BURGER S DECINES',
+  businessAddress: '19 AVENUE FRANKLIN ROOSEVELT 69150 DECINES-CHARPIEU',
+  businessSiret: 'SIRET : 53881582000013',
+  businessTvaIntra: 'TVA INTRA : FR00798980363',
+  businessPhone: 'TEL : 04 72 82 02 97',
+  footerLine1: 'Bon appetit !',
+  footerLine2: 'Merci de votre visite !',
+  showLogo: true,
+  headerBold: false,
+  footerBold: false,
+  showSeller: true,
+  showTable: true,
+  showPaymentLine: true,
+  showTaxTable: true,
+  compactMode: false,
+};
+
+export const normalizeTicketCustomization = (
+  value?: Partial<TicketCustomization> | null,
+): TicketCustomization => ({
+  businessName: clampTicketText(value?.businessName ?? DEFAULT_TICKET_CUSTOMIZATION.businessName),
+  businessAddress: clampTicketText(value?.businessAddress ?? DEFAULT_TICKET_CUSTOMIZATION.businessAddress),
+  businessSiret: clampTicketText(value?.businessSiret ?? DEFAULT_TICKET_CUSTOMIZATION.businessSiret),
+  businessTvaIntra: clampTicketText(value?.businessTvaIntra ?? DEFAULT_TICKET_CUSTOMIZATION.businessTvaIntra),
+  businessPhone: clampTicketText(value?.businessPhone ?? DEFAULT_TICKET_CUSTOMIZATION.businessPhone),
+  footerLine1: clampTicketText(value?.footerLine1 ?? DEFAULT_TICKET_CUSTOMIZATION.footerLine1),
+  footerLine2: clampTicketText(value?.footerLine2 ?? DEFAULT_TICKET_CUSTOMIZATION.footerLine2),
+  showLogo: toBool(value?.showLogo, DEFAULT_TICKET_CUSTOMIZATION.showLogo),
+  headerBold: toBool(value?.headerBold, DEFAULT_TICKET_CUSTOMIZATION.headerBold),
+  footerBold: toBool(value?.footerBold, DEFAULT_TICKET_CUSTOMIZATION.footerBold),
+  showSeller: toBool(value?.showSeller, DEFAULT_TICKET_CUSTOMIZATION.showSeller),
+  showTable: toBool(value?.showTable, DEFAULT_TICKET_CUSTOMIZATION.showTable),
+  showPaymentLine: toBool(value?.showPaymentLine, DEFAULT_TICKET_CUSTOMIZATION.showPaymentLine),
+  showTaxTable: toBool(value?.showTaxTable, DEFAULT_TICKET_CUSTOMIZATION.showTaxTable),
+  compactMode: toBool(value?.compactMode, DEFAULT_TICKET_CUSTOMIZATION.compactMode),
+});
+
 export type PrinterSettings = {
   printMode: PrintMode;
   cashPrinterUrl: string;
   kitchenPrinterUrl: string;
   usbPrinterId: string;
   usbPrinterName: string;
+  cashDrawerEnabled: boolean;
   serviceTicketEnabled: boolean;
   /** Pourcentage de majoration nuit (0 = désactivé) */
   nightSurchargePercent: number;
+  ticketCustomization: TicketCustomization;
 };
 
 export type DailyStats = {
@@ -164,6 +231,9 @@ export type ClosureSnapshot = {
   paymentBreakdown: Record<string, number>;
   lastTicketNumber: number;
   taxBreakdown?: TaxBreakdownLine[];
+  openingCash?: number;
+  cashCounted?: number;
+  cashVariance?: number;
 };
 
 export type ClosureRecord = ClosureSnapshot & {

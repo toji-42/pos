@@ -93,11 +93,14 @@ import {
     CartItem,
     ClosureRecord,
     ClosureSnapshot,
+    DEFAULT_TICKET_CUSTOMIZATION,
     DailyStats,
     LegalArchiveVerification,
+    normalizeTicketCustomization,
     OrderStatus,
     OrderType,
     PrinterSettings,
+    TicketCustomization,
     Product,
     ProductCategory,
     TaxLine,
@@ -119,6 +122,7 @@ const COLORS = {
 const TAX_RATE_SUR_PLACE: Record<ProductCategory, number> = {
     burgers: 0.1,
     snacks: 0.1,
+    salades: 0.1,
     desserts: 0.1,
     boissons: 0.1,
     accompagnements: 0.1,
@@ -128,6 +132,7 @@ const TAX_RATE_SUR_PLACE: Record<ProductCategory, number> = {
 const TAX_RATE_A_EMPORTER: Record<ProductCategory, number> = {
     burgers: 0.1,
     snacks: 0.1,
+    salades: 0.1,
     desserts: 0.1,
     boissons: 0.055,
     accompagnements: 0.1,
@@ -154,7 +159,111 @@ const SATAY_MARINADES = [
     { label: 'Nature', icon: '🌿' },
 ];
 
+const SALAD_PROTEIN_OPTIONS = [
+    "Crusty Panka'S Smocky x2",
+    "Crusty Panka'S Spicy x2",
+    "Satay'S x2",
+    'Sakitori 2',
+    'Double Emmental',
+    'Thon',
+];
+
+const SALAD_SAUCE_OPTIONS = [
+    'César',
+    'Miel Moutarde',
+    'Sauce Thaï',
+    'Sauce Agnel',
+    'Vinaigrette',
+    "Huile d'olive",
+];
+
+const SUNDAE_NAPPAGE_OPTIONS = ['Sans Coulis', 'Choco', 'Caramel', 'Fraise'];
+const SUNDAE_CROQUANT_OPTIONS = ['Cacahuète', 'Smarties', 'Kit Kat', 'Crunch', 'Pop Corn', 'Sans Croquant'];
+const MAX_SUNDAE_CROQUANTS = 2;
+
 const isSatayProduct = (product: Product) => product.slug?.startsWith('satay_s') ?? false;
+const isSaladProduct = (product: Product) => product.category === 'salades';
+const isSundaeProduct = (product: Product) => {
+    const slug = (product.slug ?? '').toLowerCase();
+    if (slug === 'sundae') return true;
+    const normalizedName = product.name
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    return normalizedName.includes('sundae');
+};
+
+type BurgerFamilyKey = 'cheese' | 'crown' | 'agnel' | 'buck' | 'kina' | 'racls' | 'stacks' | 'classiques' | 'autres';
+
+const BURGER_FAMILY_ORDER: BurgerFamilyKey[] = [
+    'cheese',
+    'crown',
+    'agnel',
+    'buck',
+    'kina',
+    'racls',
+    'stacks',
+    'classiques',
+    'autres',
+];
+
+const BURGER_FAMILY_LABELS: Record<BurgerFamilyKey, string> = {
+    cheese: 'Cheese',
+    crown: 'Crown',
+    agnel: 'Agnel',
+    buck: 'Buck',
+    kina: 'Kina',
+    racls: "Racl'S",
+    stacks: "Stack'S",
+    classiques: 'Classiques',
+    autres: 'Autres',
+};
+
+const BURGER_FAMILY_INDEX = BURGER_FAMILY_ORDER.reduce((acc, key, index) => {
+    acc[key] = index;
+    return acc;
+}, {} as Record<BurgerFamilyKey, number>);
+
+const resolveBurgerFamily = (product: Product): BurgerFamilyKey => {
+    const slug = (product.slug ?? '').toLowerCase();
+    const normalizedName = product.name
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+
+    if (slug.includes('cheese') || normalizedName.includes('cheese')) return 'cheese';
+    if (slug.startsWith('crown_') || normalizedName.includes('crown')) return 'crown';
+    if (slug.startsWith('agnel_') || normalizedName.includes('agnel')) return 'agnel';
+    if (slug.startsWith('buck_') || normalizedName.includes('buck')) return 'buck';
+    if (slug.startsWith('kina_') || normalizedName.includes('kina')) return 'kina';
+    if (slug.startsWith('racls_') || normalizedName.includes('racl')) return 'racls';
+    if (slug.startsWith('stacks_') || normalizedName.includes('stack')) return 'stacks';
+    if (product.category === 'burgers') return 'classiques';
+    return 'autres';
+};
+
+const sortBurgersByFamily = (items: Product[]) =>
+    [...items].sort((a, b) => {
+        const familyA = resolveBurgerFamily(a);
+        const familyB = resolveBurgerFamily(b);
+        const familyDiff = (BURGER_FAMILY_INDEX[familyA] ?? 999) - (BURGER_FAMILY_INDEX[familyB] ?? 999);
+        if (familyDiff !== 0) return familyDiff;
+        return a.name.localeCompare(b.name, 'fr-FR', { sensitivity: 'base' });
+    });
+
+const getBurgerFamilyLabel = (product?: Product | null) => {
+    if (!product || product.category !== 'burgers') return null;
+    return BURGER_FAMILY_LABELS[resolveBurgerFamily(product)];
+};
+
+const isBurgerFamilyBreak = (items: Product[], index: number) => {
+    if (index < 0 || index >= items.length) return false;
+    const currentFamily = getBurgerFamilyLabel(items[index]);
+    if (!currentFamily) return false;
+    if (index === 0) return true;
+    const previousFamily = getBurgerFamilyLabel(items[index - 1]);
+    return previousFamily !== currentFamily;
+};
 
 const SNACK_SAUCE_RULES_BY_SLUG: Record<string, 1 | 2> = {
     nugget_s_x6: 1,
@@ -168,21 +277,30 @@ const SNACK_SAUCE_RULES_BY_SLUG: Record<string, 1 | 2> = {
 };
 
 const SNACK_SAUCE_FALLBACK_OPTIONS = ['Ketchup', 'Mayo', 'Sauce BBQ', 'Sauce Chinoise', 'Sauce Curry Mango'];
+const PAYMENT_METHOD_OPTIONS = ['Espèces', 'Carte', 'Ticket Restaurant', 'Chèque Vacances', 'Titre Restaurant CB'];
+const PAYMENT_METHOD_MIX_PRESETS = [
+    'Espèces / Carte',
+    'Carte / Titre Restaurant CB',
+    'Carte / Ticket Restaurant',
+];
 
 // Produits inclus dans le menu "Edition Limitee" (fallback local).
 const MENU_EDITION_LIMITEE_SLUGS = new Set([
     'crown_original',
     'crown_spicy',
     'le_plena',
+    'croq_s',
     'racls_beef',
     'racls_chicken',
     'stacks_beef',
     'stacks_chicken',
-    'chicken_fil_s_thai_x5',
-    'chicken_fil_s_bbq_x5',
+    'chicken_fil_s_thai',
+    'chicken_fil_s_bbq',
     'sakitori_x3',
     'sakitori_x6',
 ]);
+
+const CROWN_MENU_SLUGS = new Set(['crown_original', 'crown_spicy']);
 
 const isEditionLimiteeProduct = (product: Product) => {
     if (product.category !== 'burgers' && product.category !== 'snacks') return false;
@@ -198,6 +316,28 @@ const isEditionLimiteeProduct = (product: Product) => {
         || normalizedSlug.includes('limited_edition')
         || normalizedSlug.includes('edition-limitee')
         || normalizedSlug.includes('limited-edition');
+};
+
+const isCrownMenuMain = (product?: Product | null) => {
+    const slug = (product?.slug ?? '').toLowerCase();
+    return CROWN_MENU_SLUGS.has(slug);
+};
+
+const WOW_SAUCE_OPTION_PRODUCT: Product = {
+    id: 'wow_sauce_option',
+    slug: 'sauce_wow',
+    name: 'Sauce WOW (+1€)',
+    price: 0,
+    category: 'sauces',
+    sendToKitchen: false,
+    sendToSalle: true,
+    active: true,
+    imageKey: '',
+};
+
+const isWowSauceOption = (product?: Product | null) => {
+    const slug = (product?.slug ?? '').toLowerCase();
+    return slug === 'sauce_wow';
 };
 
 const resolveSnackSauceRequiredCount = (product: Product): 1 | 2 | null => {
@@ -216,11 +356,12 @@ const resolveSnackSauceRequiredCount = (product: Product): 1 | 2 | null => {
     return null;
 };
 
-const CATEGORIES: ProductCategory[] = ['burgers', 'snacks', 'accompagnements', 'desserts', 'boissons', 'sauces'];
+const CATEGORIES: ProductCategory[] = ['burgers', 'snacks', 'salades', 'accompagnements', 'desserts', 'boissons', 'sauces'];
 
 const CATEGORY_LABELS: Record<ProductCategory, string> = {
     burgers: 'Burgers',
     snacks: 'Tex Mex',
+    salades: 'Salades',
     accompagnements: 'Accompagnements',
     desserts: 'Desserts',
     boissons: 'Boissons',
@@ -228,19 +369,27 @@ const CATEGORY_LABELS: Record<ProductCategory, string> = {
 };
 
 type SidebarSection = 'vente' | 'stock' | 'tickets' | 'fermeture' | 'parametres';
-type SaleTunnelStep = 'menu' | 'burger' | 'snack' | 'accompagnement' | 'dessert' | 'boisson' | 'sauce';
-type MenuFlowType = 'menu_burgers' | 'menu_tex_mex' | 'menu_edition_limitee' | 'menu_kids';
+type SaleTunnelStep = 'menu' | 'burger' | 'snack' | 'salade' | 'accompagnement' | 'dessert' | 'boisson' | 'sauce';
+type MenuFlowType = 'menu_burgers' | 'menu_tex_mex' | 'menu_salade' | 'menu_edition_limitee' | 'menu_kids';
 type MenuStage = 'main' | 'side' | 'drink' | 'sauce' | 'dessert' | 'toy';
 type ProductPickTarget = 'cart' | 'menu_main';
 type ToastType = 'success' | 'error';
 type TicketPreviewMode = 'caisse' | 'cuisine';
+type TicketCustomizationPreviewChannel = 'cash' | 'kitchen' | 'service';
 type TicketCorrectionMode = 'cancel';
 type StockFilter = ProductCategory | 'all' | 'edition_limitee';
+type CashDrawerTestStatus = {
+    testedAt: string;
+    commandOk: boolean;
+    operatorConfirmedOpen: boolean | null;
+    message: string;
+};
 
 const SALE_TUNNEL_STEPS: Record<SaleTunnelStep, { label: string; icon: string; categories: ProductCategory[] }> = {
-    menu: { label: 'Menu', icon: '', categories: ['burgers', 'snacks'] },
+    menu: { label: 'Menu', icon: '', categories: ['burgers', 'snacks', 'salades'] },
     burger: { label: '', icon: '🍔', categories: ['burgers'] },
     snack: { label: '', icon: '🌮', categories: ['snacks'] },
+    salade: { label: '', icon: '🥗', categories: ['salades'] },
     accompagnement: { label: '', icon: '🍟', categories: ['accompagnements'] },
     dessert: { label: '', icon: '🍩', categories: ['desserts'] },
     boisson: { label: '', icon: '🥤', categories: ['boissons'] },
@@ -250,8 +399,14 @@ const SALE_TUNNEL_STEPS: Record<SaleTunnelStep, { label: string; icon: string; c
 const MENU_FLOW_LABELS: Record<MenuFlowType, string> = {
     menu_burgers: "Menu Burger'S",
     menu_tex_mex: 'Menu Tex Mex',
+    menu_salade: 'Menu Salade',
     menu_edition_limitee: 'Menu Edition Limitee',
     menu_kids: "Menu Kid'S",
+};
+
+const MENU_FLOW_BUTTON_LABELS: Record<MenuFlowType, string> = {
+    ...MENU_FLOW_LABELS,
+    menu_edition_limitee: 'Edition Limitee',
 };
 
 const MENU_CLASSIQUE_STAGES: MenuStage[] = ['main', 'side', 'drink'];
@@ -276,12 +431,15 @@ const PRODUCT_IMAGES: Record<string, number> = {
     cheesy_fries: require('./assets/products/cheesy_fries.png'),
     cheesy_pots: require('./assets/products/cheesy_pots.png'),
     chicken_fils: require('./assets/products/chicken_fils.png'),
+    cone_glace: require('./assets/products/cône_glacé.avif'),
     compote: require('./assets/products/compote.png'),
     cookie: require('./assets/products/cookie.avif'),
     cordoba: require('./assets/products/cordoba.avif'),
     crown_original: require('./assets/products/crown_original.png'),
     crusty_pankas: require('./assets/products/crusty_pankas.png'),
+    delice_glace: require('./assets/products/délice_glacés.avif'),
     donuts: require('./assets/products/donuts.avif'),
+    double_cookies_glace: require('./assets/products/double_cookies_glacé.avif'),
     fish: require('./assets/products/fish.avif'),
     florin: require('./assets/products/florin.avif'),
     frites: require('./assets/products/frites.avif'),
@@ -294,6 +452,7 @@ const PRODUCT_IMAGES: Record<string, number> = {
     le_double_cheese: require('./assets/products/le_double_cheese.avif'),
     le_doublon: require('./assets/products/le_doublon.avif'),
     le_kina_original: require('./assets/products/le_kina_original.webp'),
+    le_mont_blanc_chocolat: require('./assets/products/le_mont_blanc_chocolat.png'),
     le_mont_blanc_vanille: require('./assets/products/le_mont_blanc_vanille.png'),
     le_plena: require('./assets/products/le_plena.png'),
     le_pound: require('./assets/products/le_pound.avif'),
@@ -332,8 +491,10 @@ const EMPTY_SETTINGS: PrinterSettings = {
     kitchenPrinterUrl: '',
     usbPrinterId: '',
     usbPrinterName: '',
+    cashDrawerEnabled: true,
     serviceTicketEnabled: true,
     nightSurchargePercent: 0,
+    ticketCustomization: { ...DEFAULT_TICKET_CUSTOMIZATION },
 };
 
 const LoginScreen = ({ onLogin }: { onLogin: (session: UserSession) => void }) => {
@@ -467,11 +628,14 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [activeSection, setActiveSection] = useState<SidebarSection>('vente');
     const [saleStep, setSaleStep] = useState<SaleTunnelStep>('menu');
     const [menuFlowType, setMenuFlowType] = useState<MenuFlowType>('menu_burgers');
+    const [editionLimiteeSelectionMode, setEditionLimiteeSelectionMode] = useState<'menu' | 'simple'>('menu');
+    const [editionLimiteeModeModalVisible, setEditionLimiteeModeModalVisible] = useState(false);
     const [menuStage, setMenuStage] = useState<MenuStage>('main');
     const [selectedMenuMainId, setSelectedMenuMainId] = useState<string | null>(null);
     const [selectedMenuSideId, setSelectedMenuSideId] = useState<string | null>(null);
     const [selectedMenuDrinkId, setSelectedMenuDrinkId] = useState<string | null>(null);
     const [selectedMenuSauceId, setSelectedMenuSauceId] = useState<string | null>(null);
+    const [isWowSauceSelected, setIsWowSauceSelected] = useState(false);
     const [selectedMenuDessertId, setSelectedMenuDessertId] = useState<string | null>(null);
     const [selectedMenuToyId, setSelectedMenuToyId] = useState<string | null>(null);
     const [menuMainCustomization, setMenuMainCustomization] = useState<{ productId: string; displayName: string } | null>(null);
@@ -511,6 +675,10 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [correctionMode, setCorrectionMode] = useState<TicketCorrectionMode>('cancel');
     const [correctionReason, setCorrectionReason] = useState('');
     const [isSavingCorrection, setIsSavingCorrection] = useState(false);
+    const [paymentCorrectionModalVisible, setPaymentCorrectionModalVisible] = useState(false);
+    const [paymentCorrectionMethod, setPaymentCorrectionMethod] = useState('');
+    const [paymentCorrectionReason, setPaymentCorrectionReason] = useState('');
+    const [isSavingPaymentCorrection, setIsSavingPaymentCorrection] = useState(false);
     const [xSnapshot, setXSnapshot] = useState<ClosureSnapshot | null>(null);
     const [zClosures, setZClosures] = useState<ClosureRecord[]>([]);
     const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
@@ -518,6 +686,8 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [isLoadingClosures, setIsLoadingClosures] = useState(false);
     const [isLoadingXReport, setIsLoadingXReport] = useState(false);
     const [isClosingZReport, setIsClosingZReport] = useState(false);
+    const [isPrintingZTicketPreview, setIsPrintingZTicketPreview] = useState(false);
+    const [isPrintingClosedFlashId, setIsPrintingClosedFlashId] = useState<number | null>(null);
     const [isExportingCsv, setIsExportingCsv] = useState(false);
     const [isExportingAudit, setIsExportingAudit] = useState(false);
     const [isExportingLegalArchive, setIsExportingLegalArchive] = useState(false);
@@ -529,6 +699,8 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [isCopyingExportsPath, setIsCopyingExportsPath] = useState(false);
     const [lastCopiedExportsPath, setLastCopiedExportsPath] = useState('');
     const [isTestingCashPrinter, setIsTestingCashPrinter] = useState(false);
+    const [isTestingCashDrawer, setIsTestingCashDrawer] = useState(false);
+    const [cashDrawerTestStatus, setCashDrawerTestStatus] = useState<CashDrawerTestStatus | null>(null);
     const [isTestingKitchenPrinter, setIsTestingKitchenPrinter] = useState(false);
     const [isScanningPrinters, setIsScanningPrinters] = useState(false);
     const [discoveredPrinters, setDiscoveredPrinters] = useState<EpsonDiscoveryItem[]>([]);
@@ -570,6 +742,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [kitchenSentForCurrentCart, setKitchenSentForCurrentCart] = useState(false);
     const [serviceSentForCurrentCart, setServiceSentForCurrentCart] = useState(false);
     const [currentOrderTicketNumber, setCurrentOrderTicketNumber] = useState<number | null>(null);
+    const currentOrderTicketNumberRef = useRef<number | null>(null);
     const [standbyModalVisible, setStandbyModalVisible] = useState(false);
     const [payChoiceOpen, setPayChoiceOpen] = useState(false);
     const [splitPayModalVisible, setSplitPayModalVisible] = useState(false);
@@ -603,6 +776,19 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [snackSauceSelections, setSnackSauceSelections] = useState<string[]>([]);
     const [snackSauceSelectionTarget, setSnackSauceSelectionTarget] = useState<ProductPickTarget>('cart');
 
+    // ── Composition Sundae ──
+    const [sundaeModalVisible, setSundaeModalVisible] = useState(false);
+    const [sundaeProduct, setSundaeProduct] = useState<Product | null>(null);
+    const [sundaeNappageSelection, setSundaeNappageSelection] = useState<string | null>(null);
+    const [sundaeCroquantSelections, setSundaeCroquantSelections] = useState<string[]>([]);
+
+    // ── Composition salade ──
+    const [saladModalVisible, setSaladModalVisible] = useState(false);
+    const [saladProduct, setSaladProduct] = useState<Product | null>(null);
+    const [saladProteinSelection, setSaladProteinSelection] = useState<string | null>(null);
+    const [saladSauceSelection, setSaladSauceSelection] = useState<string | null>(null);
+    const [saladSelectionTarget, setSaladSelectionTarget] = useState<ProductPickTarget>('cart');
+
     // ── Ouverture de caisse ──
     const [caisseOpenState, setCaisseOpenStateLocal] = useState<CaisseOpenState>({ isOpen: false, openedAt: null, openedBy: null });
     const [ouvertureModalVisible, setOuvertureModalVisible] = useState(false);
@@ -616,7 +802,6 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     // ── Fermeture de caisse ──
     const [closurePeriodTickets, setClosurePeriodTickets] = useState<StoredTicket[]>([]);
     const [isLoadingPeriodTickets, setIsLoadingPeriodTickets] = useState(false);
-    const [cashCountInput, setCashCountInput] = useState('');
     const [closurePreviewText, setClosurePreviewText] = useState('');
 
     const sanitizeFilePart = (value: string) => value.replace(/[:.]/g, '-').replace(/\s+/g, '_');
@@ -656,10 +841,6 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const loadRecentTickets = async () => {
-        if (session.role !== 'admin') {
-            return;
-        }
-
         const recent = await getRecentTickets(50);
         setTickets(recent);
         setSelectedTicketId((prev) => {
@@ -673,7 +854,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const loadRecentClosures = async () => {
-        if (session.role !== 'admin' || isLoadingClosures) {
+        if (isLoadingClosures) {
             return;
         }
 
@@ -718,6 +899,21 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         return value || 'Non précisé';
     };
 
+    const isCashPaymentMethod = (value: string) =>
+        value
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .includes('especes');
+
+    const normalizePaymentMethodForCompare = (value: string) =>
+        value
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+
     const extractSubnetFromUrl = (value: string) => {
         const trimmed = value.trim();
         if (!trimmed) {
@@ -749,6 +945,18 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setMessage(text);
     };
 
+    const ensureCaisseOpen = (context: 'commande' | 'encaissement' = 'commande') => {
+        if (caisseOpenState.isOpen) return true;
+        setOuvertureModalVisible(true);
+        showToast(
+            context === 'encaissement'
+                ? 'Ouverture caisse obligatoire avant encaissement.'
+                : 'Ouverture caisse obligatoire avant prise de commande.',
+            'error',
+        );
+        return false;
+    };
+
     const resolveRuntimePrinterSettings = useCallback((base: PrinterSettings): PrinterSettings => {
         if (base.printMode !== 'usb_single') {
             return {
@@ -757,6 +965,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 kitchenPrinterUrl: base.kitchenPrinterUrl.trim(),
                 usbPrinterId: base.usbPrinterId.trim(),
                 usbPrinterName: base.usbPrinterName.trim(),
+                ticketCustomization: normalizeTicketCustomization(base.ticketCustomization),
             };
         }
 
@@ -767,8 +976,92 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             kitchenPrinterUrl: usbUrl,
             usbPrinterId: base.usbPrinterId.trim(),
             usbPrinterName: base.usbPrinterName.trim(),
+            ticketCustomization: normalizeTicketCustomization(base.ticketCustomization),
         };
     }, []);
+
+    const updateTicketCustomization = useCallback((patch: Partial<TicketCustomization>) => {
+        setSettings((prev) => ({
+            ...prev,
+            ticketCustomization: normalizeTicketCustomization({
+                ...prev.ticketCustomization,
+                ...patch,
+            }),
+        }));
+    }, []);
+
+    const toggleTicketCustomizationFlag = useCallback((
+        field: 'showLogo' | 'headerBold' | 'footerBold' | 'showSeller' | 'showTable' | 'showPaymentLine' | 'showTaxTable' | 'compactMode',
+    ) => {
+        updateTicketCustomization({ [field]: !settings.ticketCustomization[field] });
+    }, [settings.ticketCustomization, updateTicketCustomization]);
+
+    const openTicketCustomizationPreview = useCallback((channel: TicketCustomizationPreviewChannel) => {
+        const runtimeSettings = resolveRuntimePrinterSettings(settings);
+        const previewSettings: PrinterSettings = {
+            ...runtimeSettings,
+            cashPrinterUrl: runtimeSettings.cashPrinterUrl || 'preview://cash',
+            kitchenPrinterUrl: runtimeSettings.kitchenPrinterUrl || 'preview://kitchen',
+        };
+        const demoPayload = {
+            cartItems: [
+                {
+                    lineId: 'preview-1',
+                    product: {
+                        id: 'preview-burger',
+                        name: 'Double Cheese',
+                        price: 8.5,
+                        category: 'burgers' as const,
+                        sendToKitchen: true,
+                        sendToSalle: true,
+                        active: true,
+                    },
+                    quantity: 2,
+                    note: 'Sans oignons',
+                },
+                {
+                    lineId: 'preview-drink',
+                    product: {
+                        id: 'preview-drink',
+                        name: 'Pepsi',
+                        price: 2.5,
+                        category: 'boissons' as const,
+                        sendToKitchen: false,
+                        sendToSalle: true,
+                        active: true,
+                    },
+                    quantity: 1,
+                },
+            ],
+            tableLabel: 'A3',
+            note: 'Client presse',
+            total: 19.5,
+            paymentMethod: 'Carte',
+            seller: session.username,
+            taxLines: [
+                { code: 'B', rate: 0.1, base: 17.73, tax: 1.77, total: 19.5 },
+            ],
+            totalHt: 17.73,
+            orderType: orderType,
+            ticketNumber: 999999,
+            discountAmount: 0,
+        };
+
+        if (channel === 'cash') {
+            const doc = buildCashTicketDocument(demoPayload, previewSettings);
+            setFullscreenTicketText(doc.ticketText);
+            return;
+        }
+
+        if (channel === 'service') {
+            const doc = buildServiceTicketDocument(demoPayload, previewSettings);
+            setFullscreenTicketText(doc?.ticketText ?? 'Aucun article salle à imprimer.');
+            return;
+        }
+
+        const docs = buildKitchenTicketDocuments(previewSettings, demoPayload);
+        setFullscreenTicketText(docs.length ? docs.map((doc) => doc.ticketText).join('\n\n') : 'Aucun article cuisine à imprimer.');
+    }, [orderType, resolveRuntimePrinterSettings, session.username, settings]);
 
     const refreshPrintQueueState = useCallback(async () => {
         try {
@@ -814,6 +1107,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     const [changePinValue, setChangePinValue] = useState('');
     const [changePinConfirm, setChangePinConfirm] = useState('');
     const isAdminRole = session.role === 'admin';
+    const canAccessClosure = isAdminRole || session.role === 'staff';
     const isAdminAccount = session.username === 'admin';
     const displayNameForUser = (username: string) => {
         if (username === 'admin') return 'Admin';
@@ -840,7 +1134,10 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 if (Object.keys(savedPins).length) {
                     applyUserPins(savedPins);
                 }
-                setSettings(loadedSettings);
+                setSettings({
+                    ...loadedSettings,
+                    ticketCustomization: normalizeTicketCustomization(loadedSettings.ticketCustomization),
+                });
                 setStats(todayStats);
                 setWeeklyStats(currentWeekStats);
                 await refreshPrintQueueState();
@@ -918,7 +1215,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     }, [nightSurchargeActive]);
 
     useEffect(() => {
-        if (activeSection === 'tickets' && session.role === 'admin') {
+        if (activeSection === 'tickets') {
             loadRecentTickets();
         }
     }, [activeSection, session.role]);
@@ -930,10 +1227,10 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     }, [activeSection, session.role]);
 
     useEffect(() => {
-        if (activeSection === 'fermeture' && session.role === 'admin') {
+        if (activeSection === 'fermeture' && canAccessClosure) {
             loadRecentClosures();
         }
-    }, [activeSection, session.role]);
+    }, [activeSection, canAccessClosure, session.role]);
 
     useEffect(() => {
         if (!message) {
@@ -965,26 +1262,47 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         }
     }, [activeSection]);
 
-    const filteredProducts = useMemo(
-        () => products.filter((product) => SALE_TUNNEL_STEPS[saleStep].categories.includes(product.category)),
-        [products, saleStep],
-    );
+    const filteredProducts = useMemo(() => {
+        const inStep = products.filter((product) => SALE_TUNNEL_STEPS[saleStep].categories.includes(product.category));
+        // Les produits "édition limitée" ne doivent pas apparaître en vente solo Burger/Tex Mex.
+        if (saleStep === 'burger' || saleStep === 'snack') {
+            const withoutEdition = inStep.filter((product) => !isEditionLimiteeProduct(product));
+            if (saleStep === 'burger') {
+                return sortBurgersByFamily(withoutEdition);
+            }
+            return withoutEdition;
+        }
+        if (saleStep === 'salade') {
+            return [...inStep].sort((a, b) => a.name.localeCompare(b.name, 'fr-FR', { sensitivity: 'base' }));
+        }
+        return inStep;
+    }, [products, saleStep]);
 
     const menuMainProducts = useMemo(() => {
         if (menuFlowType === 'menu_burgers') {
-            // Menu Burger'S: only burgers with a menu price
-            return products.filter(
+            // Menu Burger'S: burgers "standards" uniquement (hors édition limitée)
+            const burgerProducts = products.filter(
                 (p) =>
                     p.category === 'burgers' &&
+                    !isEditionLimiteeProduct(p) &&
                     (p.menuPrice !== undefined || (p.slug && MENU_PRICES_BY_SLUG[p.slug] !== undefined)),
             );
+            return sortBurgersByFamily(burgerProducts);
         }
         if (menuFlowType === 'menu_tex_mex') {
-            // Menu Tex Mex: only snacks with a menu price
+            // Menu Tex Mex: snacks "standards" uniquement (hors édition limitée)
             return products.filter(
                 (p) =>
                     p.category === 'snacks' &&
+                    !isEditionLimiteeProduct(p) &&
                     (p.menuPrice !== undefined || (p.slug && MENU_PRICES_BY_SLUG[p.slug] !== undefined)),
+            );
+        }
+        if (menuFlowType === 'menu_salade') {
+            return products.filter(
+                (p) =>
+                    p.category === 'salades'
+                    && (p.menuPrice !== undefined || (p.slug && MENU_PRICES_BY_SLUG[p.slug] !== undefined)),
             );
         }
         if (menuFlowType === 'menu_edition_limitee') {
@@ -1073,6 +1391,11 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     );
 
     const currentMenuStages = menuFlowType === 'menu_kids' ? MENU_KIDS_STAGES : MENU_CLASSIQUE_STAGES;
+    const isClassicMenuFlow =
+        menuFlowType === 'menu_burgers'
+        || menuFlowType === 'menu_tex_mex'
+        || menuFlowType === 'menu_salade'
+        || menuFlowType === 'menu_edition_limitee';
 
     const menuDisplayedProducts = useMemo(() => {
         if (menuStage === 'main') return menuMainProducts;
@@ -1083,6 +1406,11 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         if (menuStage === 'toy') return menuToyProducts;
         return menuMainProducts;
     }, [menuStage, menuMainProducts, menuSideProducts, menuDrinkProducts, menuSauceProducts, menuDessertProducts, menuToyProducts]);
+    const editionLimiteeSimpleProducts = useMemo(
+        () => products.filter((p) => isEditionLimiteeProduct(p)),
+        [products],
+    );
+    const isEditionLimiteeSimpleMode = menuFlowType === 'menu_edition_limitee' && editionLimiteeSelectionMode === 'simple';
 
     const selectedMenuMain = useMemo(
         () => products.find((p) => p.id === selectedMenuMainId) ?? null,
@@ -1111,6 +1439,23 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
 
     const currentStageIndex = currentMenuStages.indexOf(menuStage);
     const totalStages = currentMenuStages.length;
+    const productGridColumns = useMemo(() => {
+        if (screenWidth >= 1700) return 4;
+        if (screenWidth >= 1200) return 3;
+        return 2;
+    }, [screenWidth]);
+    const productCardWidth = useMemo(() => {
+        if (productGridColumns === 4) return '23%';
+        if (productGridColumns === 3) return '31.5%';
+        return '48%';
+    }, [productGridColumns]);
+    const menuGridProducts = useMemo(
+        () => (isEditionLimiteeSimpleMode ? editionLimiteeSimpleProducts : menuDisplayedProducts),
+        [isEditionLimiteeSimpleMode, editionLimiteeSimpleProducts, menuDisplayedProducts],
+    );
+    const shouldShowMenuBurgerFamilySeparators =
+        !isEditionLimiteeSimpleMode && menuFlowType === 'menu_burgers' && menuStage === 'main';
+    const shouldShowSoloBurgerFamilySeparators = saleStep === 'burger';
 
     const canOpenStage = (stage: MenuStage): boolean => {
         // When editing an existing menu, all stages are freely navigable
@@ -1160,6 +1505,15 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     }, [selectedTicket, ticketPreviewMode]);
 
     const canCorrectSelectedTicket = selectedTicket?.orderStatus === 'sale' && !selectedTicket?.isCopy;
+    const hasPaymentCorrectionSelectedTicket = useMemo(() => {
+        if (!selectedTicket) return false;
+        return tickets.some(
+            (ticket) =>
+                ticket.originalOrderId === selectedTicket.id
+                && (ticket.note ?? '').toUpperCase().includes('RECTIF ENCAISSEMENT'),
+        );
+    }, [selectedTicket, tickets]);
+    const canEditPaymentSelectedTicket = canCorrectSelectedTicket && !hasPaymentCorrectionSelectedTicket;
 
     // ── POS ticket helpers (32-char width) ──────────────────────────────────
     const POS_W = 32;
@@ -1298,25 +1652,18 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         lines.push(posLR('TOTAL :', `${paymentTotals.total.toFixed(2)}€`));
         lines.push(POS_SEP);
 
-        // ── Comptage caisse ──
-        if (cashCountInput) {
-            const aggregatedEspeces = paymentTotals.especes;
-            const counted = parseFloat(cashCountInput || '0');
-            const variance = counted - aggregatedEspeces;
-            lines.push(posCenter('COMPTAGE CAISSE'));
-            lines.push(POS_SEP);
-            lines.push(posLR('Especes theorique:', `${aggregatedEspeces.toFixed(2)}€`));
-            lines.push(posLR('Especes comptees:', `${counted.toFixed(2)}€`));
-            lines.push(posLR('Ecart:', `${variance >= 0 ? '+' : ''}${variance.toFixed(2)}€`));
-            lines.push(POS_SEP);
-        }
-
         return lines.join('\n');
-    }, [xSnapshot, cashCountInput, session.username, caisseOpenState.openedAt]);
+    }, [xSnapshot, session.username, caisseOpenState.openedAt]);
 
     const getTicketTypeLabel = (ticket: StoredTicket) => {
         if (ticket.orderStatus === 'cancel') {
             return 'ANNULATION';
+        }
+        if (ticket.orderStatus === 'refund') {
+            return 'REMBOURSEMENT';
+        }
+        if ((ticket.note ?? '').toUpperCase().includes('RECTIF ENCAISSEMENT')) {
+            return 'RECTIF';
         }
         if (ticket.isCopy) {
             return 'DUPLICATA';
@@ -1497,7 +1844,43 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setSnackSauceSelectionTarget('cart');
     };
 
+    const closeSundaeModal = () => {
+        setSundaeModalVisible(false);
+        setSundaeProduct(null);
+        setSundaeNappageSelection(null);
+        setSundaeCroquantSelections([]);
+    };
+
+    const toggleSundaeCroquant = (croquantLabel: string) => {
+        setSundaeCroquantSelections((prev) => {
+            const isSelected = prev.includes(croquantLabel);
+            if (isSelected) {
+                return prev.filter((entry) => entry !== croquantLabel);
+            }
+
+            if (croquantLabel === 'Sans Croquant') {
+                return ['Sans Croquant'];
+            }
+
+            const withoutSansCroquant = prev.filter((entry) => entry !== 'Sans Croquant');
+            if (withoutSansCroquant.length >= MAX_SUNDAE_CROQUANTS) {
+                return withoutSansCroquant;
+            }
+
+            return [...withoutSansCroquant, croquantLabel];
+        });
+    };
+
+    const closeSaladModal = () => {
+        setSaladModalVisible(false);
+        setSaladProduct(null);
+        setSaladProteinSelection(null);
+        setSaladSauceSelection(null);
+        setSaladSelectionTarget('cart');
+    };
+
     const addSnackWithSauces = () => {
+        if (!ensureCaisseOpen('commande')) return;
         if (!snackSauceProduct) return;
 
         if (snackSauceSelections.length !== snackSauceRequiredCount) {
@@ -1562,7 +1945,127 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         closeSnackSauceModal();
     };
 
+    const addSundaeWithOptions = () => {
+        if (!ensureCaisseOpen('commande')) return;
+        if (!sundaeProduct) return;
+        if (!sundaeNappageSelection) {
+            showToast('Choisissez un nappage.', 'error');
+            return;
+        }
+
+        const selectedCroquants = sundaeCroquantSelections.length > 0
+            ? [...sundaeCroquantSelections]
+            : ['Sans Croquant'];
+        const note = `Nappage: ${sundaeNappageSelection} | Croquant: ${selectedCroquants.join(' + ')}`;
+        const variantKey = `${sundaeNappageSelection}_${selectedCroquants.join('_')}`
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '');
+        const lineId = `${sundaeProduct.id}-${variantKey}-${Date.now()}`;
+
+        setCart((prev) => {
+            const existing = prev.find(
+                (line) => line.kind !== 'menu' && line.product.id === sundaeProduct.id && line.note === note,
+            );
+
+            if (existing) {
+                return prev.map((line) =>
+                    line.lineId === existing.lineId ? { ...line, quantity: line.quantity + 1 } : line,
+                );
+            }
+
+            return [
+                ...prev,
+                {
+                    lineId,
+                    product: sundaeProduct,
+                    quantity: 1,
+                    kind: 'product',
+                    note,
+                },
+            ];
+        });
+
+        closeSundaeModal();
+    };
+
+    const addSaladWithComposition = () => {
+        if (!ensureCaisseOpen('commande')) return;
+        if (!saladProduct) return;
+        if (!saladProteinSelection || !saladSauceSelection) {
+            showToast('Choisissez une protéine et une sauce.', 'error');
+            return;
+        }
+
+        const note = `Protéine: ${saladProteinSelection} | Sauce: ${saladSauceSelection}`;
+        const customizedDisplayName = `${saladProduct.name} (${saladProteinSelection} + ${saladSauceSelection})`;
+
+        if (saladSelectionTarget === 'menu_main') {
+            setSelectedMenuMainId(saladProduct.id);
+            setMenuMainCustomization({
+                productId: saladProduct.id,
+                displayName: customizedDisplayName,
+            });
+            closeSaladModal();
+
+            if (
+                saveEditedMenuSelection('main', saladProduct, {
+                    mainProductOverride: saladProduct,
+                    mainDisplayNameOverride: customizedDisplayName,
+                })
+            ) {
+                return;
+            }
+
+            goToNextMenuStage('main');
+            return;
+        }
+
+        setCart((prev) => {
+            const existing = prev.find(
+                (line) => line.kind !== 'menu' && line.product.id === saladProduct.id && line.note === note,
+            );
+
+            if (existing) {
+                return prev.map((line) =>
+                    line.lineId === existing.lineId ? { ...line, quantity: line.quantity + 1 } : line,
+                );
+            }
+
+            return [
+                ...prev,
+                {
+                    lineId: `${saladProduct.id}-${Date.now()}`,
+                    product: saladProduct,
+                    quantity: 1,
+                    kind: 'product',
+                    note,
+                },
+            ];
+        });
+
+        closeSaladModal();
+    };
+
     const addProductToCart = (product: Product) => {
+        if (!ensureCaisseOpen('commande')) return;
+        if (isSundaeProduct(product)) {
+            setSundaeProduct(product);
+            setSundaeNappageSelection(null);
+            setSundaeCroquantSelections([]);
+            setSundaeModalVisible(true);
+            return;
+        }
+        if (isSaladProduct(product)) {
+            setSaladProduct(product);
+            setSaladProteinSelection(null);
+            setSaladSauceSelection(null);
+            setSaladSelectionTarget('cart');
+            setSaladModalVisible(true);
+            return;
+        }
         const requiredSauceCount = resolveSnackSauceRequiredCount(product);
         if (requiredSauceCount) {
             setSnackSauceProduct(product);
@@ -1594,6 +2097,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const addSatayWithMarinade = (marinade: string) => {
+        if (!ensureCaisseOpen('commande')) return;
         if (!marinadeProduct) return;
         const marinadeLabel = marinade;
         const displayName = `${marinadeProduct.name} - ${marinadeLabel}`;
@@ -1645,7 +2149,20 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const handleMenuFlowChange = (flow: MenuFlowType) => {
-        setMenuFlowType(flow);
+        if (flow !== 'menu_edition_limitee') {
+            setEditionLimiteeSelectionMode('menu');
+            setEditionLimiteeModeModalVisible(false);
+            setMenuFlowType(flow);
+            resetComposedMenu();
+            return;
+        }
+        setEditionLimiteeModeModalVisible(true);
+    };
+
+    const applyEditionLimiteeSelectionMode = (mode: 'menu' | 'simple') => {
+        setEditionLimiteeSelectionMode(mode);
+        setMenuFlowType('menu_edition_limitee');
+        setEditionLimiteeModeModalVisible(false);
         resetComposedMenu();
     };
 
@@ -1655,6 +2172,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setSelectedMenuSideId(null);
         setSelectedMenuDrinkId(null);
         setSelectedMenuSauceId(null);
+        setIsWowSauceSelected(false);
         setSelectedMenuDessertId(null);
         setSelectedMenuToyId(null);
         setMenuMainCustomization(null);
@@ -1681,6 +2199,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
 
         // Sélectionner le bon flow type
         const flow = item.menuType ?? 'menu_burgers';
+        setEditionLimiteeSelectionMode('menu');
         setMenuFlowType(flow);
 
         // Pré-remplir les sélections depuis le menu existant
@@ -1690,11 +2209,13 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         const sauceItem = item.menuItems.find((mi) => mi.role === 'sauce');
         const dessertItem = item.menuItems.find((mi) => mi.role === 'dessert');
         const toyItem = item.menuItems.find((mi) => mi.role === 'toy');
+        const wowSauceSelected = Boolean(sauceItem && isWowSauceOption(sauceItem.product));
 
         setSelectedMenuMainId(mainItem?.product.id ?? null);
         setSelectedMenuSideId(sideItem?.product.id ?? null);
         setSelectedMenuDrinkId(drinkItem?.product.id ?? null);
-        setSelectedMenuSauceId(sauceItem?.product.id ?? null);
+        setSelectedMenuSauceId(wowSauceSelected ? null : (sauceItem?.product.id ?? null));
+        setIsWowSauceSelected(wowSauceSelected);
         setSelectedMenuDessertId(dessertItem?.product.id ?? null);
         setSelectedMenuToyId(toyItem?.product.id ?? null);
         setMenuMainCustomization(
@@ -1710,17 +2231,18 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setEditingMenuLineId(lineId);
     };
 
-    const resolveMenuClassiquePrice = (main: Product, side: Product) => {
+    const resolveMenuClassiquePrice = (main: Product, side: Product, options?: { withWowSauce?: boolean }) => {
         const bySlug = main.slug ? MENU_PRICES_BY_SLUG[main.slug] : undefined;
         const mapped = main.menuPrice ?? bySlug;
         const supplement = side.menuSupplement ?? 0;
+        const wowSauceSupplement = isCrownMenuMain(main) && options?.withWowSauce ? 1 : 0;
 
         if (typeof mapped === 'number') {
-            return Number((mapped + supplement).toFixed(2));
+            return Number((mapped + supplement + wowSauceSupplement).toFixed(2));
         }
 
         // Fallback: main.price + 3.80 (average menu uplift) + supplement
-        return Number((main.price + 3.80 + supplement).toFixed(2));
+        return Number((main.price + 3.80 + supplement + wowSauceSupplement).toFixed(2));
     };
 
     const KIDS_MENU_PRICE = 5.00;
@@ -1751,6 +2273,16 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         }
     };
 
+    const shouldApplyWowSauce = (main: Product) =>
+        menuFlowType === 'menu_edition_limitee' && isCrownMenuMain(main) && isWowSauceSelected;
+
+    const resolveMenuSauceOptionProduct = (main: Product, fallbackSauce?: Product | null) => {
+        if (shouldApplyWowSauce(main)) {
+            return WOW_SAUCE_OPTION_PRODUCT;
+        }
+        return fallbackSauce ?? null;
+    };
+
     const saveEditedMenuSelection = (
         stage: MenuStage,
         pickedProduct: Product,
@@ -1771,12 +2303,14 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         const toy = stage === 'toy' ? pickedProduct : selectedMenuToy;
 
         if (
-            (menuFlowType === 'menu_burgers' || menuFlowType === 'menu_tex_mex' || menuFlowType === 'menu_edition_limitee')
+            isClassicMenuFlow
             && main
             && side
             && drink
         ) {
-            const menuPrice = resolveMenuClassiquePrice(main, side);
+            const menuPrice = resolveMenuClassiquePrice(main, side, {
+                withWowSauce: shouldApplyWowSauce(main),
+            });
             const flowLabel = MENU_FLOW_LABELS[menuFlowType];
             const mainMenuItem = resolveMenuMainProductForMenuItems(main, options?.mainDisplayNameOverride);
             const menuItemsList: CartItem['menuItems'] = [
@@ -1784,8 +2318,9 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 { role: 'side', product: side },
                 { role: 'drink', product: drink },
             ];
-            if (sauce) {
-                menuItemsList.push({ role: 'sauce', product: sauce });
+            const sauceProduct = resolveMenuSauceOptionProduct(main, sauce);
+            if (sauceProduct) {
+                menuItemsList.push({ role: 'sauce', product: sauceProduct });
             }
 
             const menuLine: CartItem = {
@@ -1847,9 +2382,12 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const handleAddMenuCombo = () => {
-        if (menuFlowType === 'menu_burgers' || menuFlowType === 'menu_tex_mex' || menuFlowType === 'menu_edition_limitee') {
+        if (!ensureCaisseOpen('commande')) return;
+        if (isClassicMenuFlow) {
             if (!selectedMenuMain || !selectedMenuSide || !selectedMenuDrink) return;
-            const menuPrice = resolveMenuClassiquePrice(selectedMenuMain, selectedMenuSide);
+            const menuPrice = resolveMenuClassiquePrice(selectedMenuMain, selectedMenuSide, {
+                withWowSauce: shouldApplyWowSauce(selectedMenuMain),
+            });
             const flowLabel = MENU_FLOW_LABELS[menuFlowType];
             const mainMenuItem = resolveMenuMainProductForMenuItems(selectedMenuMain);
             const menuItemsList: CartItem['menuItems'] = [
@@ -1857,8 +2395,9 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 { role: 'side', product: selectedMenuSide },
                 { role: 'drink', product: selectedMenuDrink },
             ];
-            if (selectedMenuSauce) {
-                menuItemsList.push({ role: 'sauce', product: selectedMenuSauce });
+            const sauceProduct = resolveMenuSauceOptionProduct(selectedMenuMain, selectedMenuSauce);
+            if (sauceProduct) {
+                menuItemsList.push({ role: 'sauce', product: sauceProduct });
             }
 
             const menuLine: CartItem = {
@@ -1926,11 +2465,43 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         resetComposedMenu();
     };
 
+    const applyMainMenuSelection = (product: Product, withWowSauce: boolean) => {
+        setMenuMainCustomization(null);
+        setSelectedMenuMainId(product.id);
+        setSelectedMenuSauceId(null);
+        setIsWowSauceSelected(withWowSauce);
+
+        if (
+            saveEditedMenuSelection(
+                'main',
+                product,
+                {
+                    mainProductOverride: product,
+                    mainDisplayNameOverride: null,
+                },
+            )
+        ) {
+            return;
+        }
+
+        goToNextMenuStage('main');
+    };
+
     const handlePickMenuProduct = (product: Product) => {
+        if (!ensureCaisseOpen('commande')) return;
         const stages = currentMenuStages;
         const stageIdx = stages.indexOf(menuStage);
 
         if (menuStage === 'main') {
+            if (isSaladProduct(product)) {
+                setSaladProduct(product);
+                setSaladProteinSelection(null);
+                setSaladSauceSelection(null);
+                setSaladSelectionTarget('menu_main');
+                setSaladModalVisible(true);
+                return;
+            }
+
             const requiredSauceCount = resolveSnackSauceRequiredCount(product);
             if (requiredSauceCount) {
                 setSnackSauceProduct(product);
@@ -1948,8 +2519,21 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 return;
             }
 
+            if (menuFlowType === 'menu_edition_limitee' && isCrownMenuMain(product)) {
+                Alert.alert(
+                    'Option Burger Noir',
+                    'Ajouter la sauce WOW (+1,00€) ?',
+                    [
+                        { text: 'Sans sauce WOW', onPress: () => applyMainMenuSelection(product, false) },
+                        { text: 'Avec sauce WOW', onPress: () => applyMainMenuSelection(product, true) },
+                    ],
+                );
+                return;
+            }
+
             setMenuMainCustomization(null);
             setSelectedMenuMainId(product.id);
+            setIsWowSauceSelected(false);
         } else if (menuStage === 'side') {
             setSelectedMenuSideId(product.id);
         } else if (menuStage === 'drink') {
@@ -1990,12 +2574,14 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             const toy = menuStage === 'toy' ? product : selectedMenuToy;
 
             if (
-                (menuFlowType === 'menu_burgers' || menuFlowType === 'menu_tex_mex' || menuFlowType === 'menu_edition_limitee')
+                isClassicMenuFlow
                 && main
                 && side
                 && drink
             ) {
-                const menuPrice = resolveMenuClassiquePrice(main, side);
+                const menuPrice = resolveMenuClassiquePrice(main, side, {
+                    withWowSauce: shouldApplyWowSauce(main),
+                });
                 const flowLabel = MENU_FLOW_LABELS[menuFlowType];
                 const mainMenuItem = resolveMenuMainProductForMenuItems(main);
                 const menuItemsList: CartItem['menuItems'] = [
@@ -2003,7 +2589,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                     { role: 'side', product: side },
                     { role: 'drink', product: drink },
                 ];
-                const sauceProduct = sauce ?? (menuStage === 'sauce' ? product : null);
+                const sauceProduct = resolveMenuSauceOptionProduct(main, sauce ?? (menuStage === 'sauce' ? product : null));
                 if (sauceProduct) {
                     menuItemsList.push({ role: 'sauce', product: sauceProduct });
                 }
@@ -2084,6 +2670,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const updateQty = (lineId: string, direction: 'inc' | 'dec') => {
+        if (!ensureCaisseOpen('commande')) return;
         setCart((prev) =>
             prev
                 .map((line) => {
@@ -2100,6 +2687,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
 
     /** Met à jour la note d'un article spécifique dans le panier */
     const setItemNote = (lineId: string, noteText: string) => {
+        if (!ensureCaisseOpen('commande')) return;
         setCart((prev) =>
             prev.map((line) => (line.lineId === lineId ? { ...line, note: noteText || undefined } : line)),
         );
@@ -2126,6 +2714,19 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
 
     const getCurrentTicketNumber = (value?: number | null) => (isValidTicketNumber(value) ? value : undefined);
 
+    const setCurrentOrderTicketNumberValue = (value: number | null) => {
+        currentOrderTicketNumberRef.current = value;
+        setCurrentOrderTicketNumber(value);
+    };
+
+    const ensureCurrentOrderTicketNumber = async (): Promise<number> => {
+        const existing = getCurrentTicketNumber(currentOrderTicketNumberRef.current);
+        if (existing) return existing;
+        const reserved = await reserveNextTicketNumber();
+        setCurrentOrderTicketNumberValue(reserved);
+        return reserved;
+    };
+
     const resetOrder = () => {
         setCart([]);
         setNoteTargetLineId(null);
@@ -2135,11 +2736,12 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         resetComposedMenu();
         setKitchenSentForCurrentCart(false);
         setServiceSentForCurrentCart(false);
-        setCurrentOrderTicketNumber(null);
+        setCurrentOrderTicketNumberValue(null);
         showToast('Commande vidée.');
     };
 
     const holdOrder = () => {
+        if (!ensureCaisseOpen('commande')) return;
         if (!cart.length) {
             showToast('Panier vide, rien à mettre en attente.', 'error');
             return;
@@ -2155,7 +2757,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 savedAt: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
                 kitchenSent: kitchenSentForCurrentCart,
                 serviceSent: serviceSentForCurrentCart,
-                ticketNumber: currentOrderTicketNumber ?? undefined,
+                ticketNumber: getCurrentTicketNumber(currentOrderTicketNumberRef.current),
             },
         ]);
         setCart([]);
@@ -2165,12 +2767,13 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setDiscountPercent(0);
         setKitchenSentForCurrentCart(false);
         setServiceSentForCurrentCart(false);
-        setCurrentOrderTicketNumber(null);
+        setCurrentOrderTicketNumberValue(null);
         resetComposedMenu();
         showToast('Commande mise en attente.');
     };
 
     const restoreOrder = (orderId: string) => {
+        if (!ensureCaisseOpen('commande')) return;
         const order = standbyOrders.find((o) => o.id === orderId);
         if (!order) return;
         if (cart.length) {
@@ -2182,7 +2785,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setOrderType(order.orderType);
         setKitchenSentForCurrentCart(order.kitchenSent);
         setServiceSentForCurrentCart(order.serviceSent ?? false);
-        setCurrentOrderTicketNumber(order.ticketNumber ?? null);
+        setCurrentOrderTicketNumberValue(getCurrentTicketNumber(order.ticketNumber) ?? null);
         setStandbyOrders((prev) => prev.filter((o) => o.id !== orderId));
         setStandbyModalVisible(false);
         showToast(order.kitchenSent ? 'Commande reprise (déjà envoyée en cuisine).' : 'Commande reprise.');
@@ -2190,8 +2793,17 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
 
     /** Envoie une commande en attente directement en cuisine sans la reprendre */
     const sendStandbyToKitchen = async (orderId: string) => {
+        if (!ensureCaisseOpen('commande')) return;
         const order = standbyOrders.find((o) => o.id === orderId);
         if (!order) return;
+        let orderTicketNumber = getCurrentTicketNumber(order.ticketNumber);
+        if (!orderTicketNumber) {
+            orderTicketNumber = await reserveNextTicketNumber();
+            const reservedForStandby = orderTicketNumber;
+            setStandbyOrders((prev) =>
+                prev.map((o) => (o.id === orderId ? { ...o, ticketNumber: reservedForStandby } : o)),
+            );
+        }
         const kitchenAlreadySent = order.kitchenSent;
         const serviceAlreadySent = order.serviceSent ?? false;
         const serviceRequested = settings.serviceTicketEnabled;
@@ -2206,7 +2818,6 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 return;
             }
             const noteText = buildAggregatedNote(order.cart);
-            const orderTicketNumber = getCurrentTicketNumber(order.ticketNumber);
             const payload = {
                 cartItems: order.cart,
                 tableLabel: order.tableLabel,
@@ -2260,6 +2871,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
 
     /** Envoie le panier courant en cuisine (et optionnellement en salle) sans encaisser */
     const sendCurrentCartToKitchen = async (forceServiceTicket = false) => {
+        if (!ensureCaisseOpen('commande')) return;
         if (!cart.length) {
             showToast('Panier vide.', 'error');
             return;
@@ -2277,7 +2889,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 return;
             }
             const noteText = buildAggregatedNote(cart);
-            const orderTicketNumber = getCurrentTicketNumber(currentOrderTicketNumber);
+            const orderTicketNumber = await ensureCurrentOrderTicketNumber();
             const payload = {
                 cartItems: cart,
                 tableLabel,
@@ -2375,6 +2987,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             kitchenPrinterUrl: settings.kitchenPrinterUrl.trim(),
             usbPrinterId: settings.usbPrinterId.trim(),
             usbPrinterName: settings.usbPrinterName.trim(),
+            ticketCustomization: normalizeTicketCustomization(settings.ticketCustomization),
         };
 
         await savePrinterSettings(nextSettings);
@@ -2561,11 +3174,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             Alert.alert('Panier vide', 'Ajoute des produits avant encaissement.');
             return;
         }
-        if (!caisseOpenState.isOpen) {
-            setOuvertureModalVisible(true);
-            showToast('Ouverture caisse obligatoire avant encaissement.', 'error');
-            return;
-        }
+        if (!ensureCaisseOpen('encaissement')) return;
 
         const isEspeces = normalized.toLowerCase() === 'espèces' || normalized.toLowerCase() === 'especes';
         if (isEspeces) {
@@ -2615,11 +3224,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             Alert.alert('Panier vide', 'Ajoute des produits avant encaissement.');
             return;
         }
-        if (!caisseOpenState.isOpen) {
-            setOuvertureModalVisible(true);
-            showToast('Ouverture caisse obligatoire avant encaissement.', 'error');
-            return;
-        }
+        if (!ensureCaisseOpen('encaissement')) return;
         const runtimeSettings = resolveRuntimePrinterSettings(settings);
         if (settings.printMode === 'usb_single' && !runtimeSettings.cashPrinterUrl) {
             showToast('Aucune imprimante USB sélectionnée.', 'error');
@@ -2644,11 +3249,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             const kitchenAlreadySent = kitchenSentForCurrentCart;
             const serviceAlreadySent = serviceSentForCurrentCart;
 
-            const hadTicketNumber = isValidTicketNumber(currentOrderTicketNumber);
-            const reservedTicketNumber = getCurrentTicketNumber(currentOrderTicketNumber) ?? await reserveNextTicketNumber();
-            if (!hadTicketNumber) {
-                setCurrentOrderTicketNumber(reservedTicketNumber);
-            }
+            const reservedTicketNumber = await ensureCurrentOrderTicketNumber();
             const basePayload = {
                 cartItems: cartSnapshot,
                 tableLabel: tableLabelSnapshot,
@@ -2665,10 +3266,10 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 ticketNumber: reservedTicketNumber,
             };
 
-            const cashDocument = buildCashTicketDocument(basePayload);
+            const cashDocument = buildCashTicketDocument(basePayload, runtimeSettings);
             const kitchenDocuments = kitchenAlreadySent ? [] : buildKitchenTicketDocuments(runtimeSettings, basePayload);
             const shouldPrintServiceTicket = !serviceAlreadySent;
-            const serviceDocument = shouldPrintServiceTicket ? buildServiceTicketDocument(basePayload) : null;
+            const serviceDocument = shouldPrintServiceTicket ? buildServiceTicketDocument(basePayload, runtimeSettings) : null;
             const kitchenText = kitchenDocuments.length
                 ? kitchenDocuments.map((doc) => doc.ticketText).join('\n\n')
                 : buildKitchenTicketText(basePayload);
@@ -2737,10 +3338,21 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
             setNoteTargetLineId(null);
             setKitchenSentForCurrentCart(false);
             setServiceSentForCurrentCart(false);
-            setCurrentOrderTicketNumber(null);
+            setCurrentOrderTicketNumberValue(null);
             resetComposedMenu();
 
-            showToast('Paiement enregistré ✓', 'success');
+            let paymentToast = 'Paiement enregistré ✓';
+            let paymentToastType: ToastType = 'success';
+            if (settings.cashDrawerEnabled && isCashPaymentMethod(normalizedPaymentMethod)) {
+                const drawerResult = await openCashDrawer(runtimeSettings.cashPrinterUrl);
+                if (drawerResult.ok) {
+                    paymentToast = 'Paiement enregistré + tiroir déclenché ✓';
+                } else {
+                    paymentToast = `Paiement enregistré (tiroir non déclenché: ${drawerResult.message})`;
+                    paymentToastType = 'error';
+                }
+            }
+            showToast(paymentToast, paymentToastType);
             await refreshStats();
             if (session.role === 'admin') {
                 await loadRecentTickets();
@@ -2756,7 +3368,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 setNoteTargetLineId(null);
                 setKitchenSentForCurrentCart(false);
                 setServiceSentForCurrentCart(false);
-                setCurrentOrderTicketNumber(null);
+                setCurrentOrderTicketNumberValue(null);
                 resetComposedMenu();
                 showToast('Vente enregistrée, mais file impression en erreur.', 'error');
                 await refreshPrintQueueState();
@@ -2772,7 +3384,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const handleLoadXReport = async () => {
-        if (session.role !== 'admin' || isLoadingXReport) {
+        if (!canAccessClosure || isLoadingXReport) {
             return;
         }
 
@@ -2788,8 +3400,66 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         }
     };
 
+    const handlePrintZTicketPreview = async () => {
+        if (!canAccessClosure || isPrintingZTicketPreview || isClosingZReport) {
+            return;
+        }
+
+        setIsPrintingZTicketPreview(true);
+        try {
+            const snapshot = await getCurrentXSnapshot();
+            setXSnapshot(snapshot);
+
+            const runtimeSettings = resolveRuntimePrinterSettings(settings);
+            const reportResult = await printDailyReport(
+                runtimeSettings,
+                { ...snapshot, closedBy: session.username, openedAt: caisseOpenState.openedAt ?? undefined },
+                { maxRetries: 0 },
+            );
+
+            if (reportResult.ok) {
+                showToast('Ticket de clôture imprimé (sans clôture).');
+            } else {
+                showToast(`Ticket non imprimé: ${reportResult.message}`, 'error');
+            }
+        } catch {
+            showToast('Impression du ticket de clôture impossible.', 'error');
+        } finally {
+            setIsPrintingZTicketPreview(false);
+        }
+    };
+
+    const handlePrintClosedFlashTicket = async (closure: ClosureRecord) => {
+        if (!canAccessClosure || isClosingZReport || isPrintingClosedFlashId === closure.id) {
+            return;
+        }
+
+        setIsPrintingClosedFlashId(closure.id);
+        try {
+            const runtimeSettings = resolveRuntimePrinterSettings(settings);
+            const reportResult = await printDailyReport(
+                runtimeSettings,
+                { ...closure, openedAt: closure.periodStart },
+                {
+                    idempotencyKey: `reprint-z-flash-${closure.id}-${Date.now()}`,
+                    maxRetries: 0,
+                },
+            );
+
+            if (reportResult.ok) {
+                showToast(`Ticket flash Z #${closure.id} imprimé.`);
+            } else {
+                showToast(`Ticket flash Z #${closure.id} non imprimé: ${reportResult.message}`, 'error');
+            }
+        } catch {
+            showToast(`Impression ticket flash Z #${closure.id} impossible.`, 'error');
+        } finally {
+            setIsPrintingClosedFlashId((current) => (current === closure.id ? null : current));
+        }
+    };
+
     const handleCloseZReport = () => {
-        if (session.role !== 'admin' || isClosingZReport) {
+        if (!canAccessClosure || isClosingZReport) {
             return;
         }
 
@@ -3076,6 +3746,82 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         }
     };
 
+    const handleTestCashDrawer = async () => {
+        if (session.role !== 'admin' || isTestingCashDrawer) {
+            return;
+        }
+
+        if (!settings.cashDrawerEnabled) {
+            showToast('Active le tiroir-caisse dans les paramètres pour le tester.', 'error');
+            return;
+        }
+
+        setIsTestingCashDrawer(true);
+        try {
+            const runtimeSettings = resolveRuntimePrinterSettings(settings);
+            if (!runtimeSettings.cashPrinterUrl) {
+                showToast('Imprimante caisse non configurée.', 'error');
+                return;
+            }
+            const result = await openCashDrawer(runtimeSettings.cashPrinterUrl);
+            const testedAt = new Date().toLocaleString('fr-FR');
+            if (!result.ok) {
+                setCashDrawerTestStatus({
+                    testedAt,
+                    commandOk: false,
+                    operatorConfirmedOpen: null,
+                    message: result.message,
+                });
+                showToast(`Test tiroir KO: ${result.message}`, 'error');
+                return;
+            }
+
+            setCashDrawerTestStatus({
+                testedAt,
+                commandOk: true,
+                operatorConfirmedOpen: null,
+                message: result.message,
+            });
+
+            Alert.alert(
+                'Confirmation tiroir',
+                'Commande envoyée. Le tiroir s’est-il bien ouvert ?',
+                [
+                    {
+                        text: 'Non',
+                        style: 'destructive',
+                        onPress: () => {
+                            setCashDrawerTestStatus({
+                                testedAt,
+                                commandOk: true,
+                                operatorConfirmedOpen: false,
+                                message: 'Commande envoyée mais tiroir non ouvert (confirmé opérateur).',
+                            });
+                            showToast('Commande envoyée, tiroir non ouvert.', 'error');
+                        },
+                    },
+                    {
+                        text: 'Oui',
+                        onPress: () => {
+                            setCashDrawerTestStatus({
+                                testedAt,
+                                commandOk: true,
+                                operatorConfirmedOpen: true,
+                                message: 'Tiroir ouvert (confirmé opérateur).',
+                            });
+                            showToast('Tiroir ouvert confirmé ✓', 'success');
+                        },
+                    },
+                ],
+                { cancelable: false },
+            );
+        } catch {
+            showToast('Test tiroir impossible.', 'error');
+        } finally {
+            setIsTestingCashDrawer(false);
+        }
+    };
+
     const handleTestKitchenPrinter = async () => {
         if (session.role !== 'admin' || isTestingKitchenPrinter) {
             return;
@@ -3336,6 +4082,10 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
     };
 
     const openTicketCorrection = (mode: TicketCorrectionMode) => {
+        if (!isAdminRole) {
+            showToast('Annulation ticket réservée admin.', 'error');
+            return;
+        }
         if (!selectedTicket) {
             showToast('Sélectionne un ticket.', 'error');
             return;
@@ -3351,7 +4101,119 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
         setCorrectionModalVisible(true);
     };
 
+    const openPaymentCorrectionModal = () => {
+        if (!isAdminRole) {
+            showToast('Correction encaissement réservée admin/manager.', 'error');
+            return;
+        }
+        if (!selectedTicket) {
+            showToast('Sélectionne un ticket.', 'error');
+            return;
+        }
+        if (selectedTicket.orderStatus !== 'sale' || selectedTicket.isCopy) {
+            showToast('Correction encaissement disponible uniquement sur un ticket de vente.', 'error');
+            return;
+        }
+        if (hasPaymentCorrectionSelectedTicket) {
+            showToast('Une correction d’encaissement existe déjà pour ce ticket.', 'error');
+            return;
+        }
+
+        setPaymentCorrectionMethod(selectedTicket.paymentMethod);
+        setPaymentCorrectionReason('');
+        setPaymentCorrectionModalVisible(true);
+    };
+
+    const submitPaymentMethodCorrection = async () => {
+        if (!isAdminRole) {
+            showToast('Correction encaissement réservée admin/manager.', 'error');
+            return;
+        }
+        if (!selectedTicket || isSavingPaymentCorrection) {
+            return;
+        }
+        if (selectedTicket.orderStatus !== 'sale' || selectedTicket.isCopy) {
+            showToast('Correction encaissement impossible sur ce ticket.', 'error');
+            return;
+        }
+
+        const reason = paymentCorrectionReason.trim();
+        const nextPaymentMethod = paymentCorrectionMethod.trim();
+        const currentPaymentMethod = selectedTicket.paymentMethod.trim();
+
+        if (!nextPaymentMethod) {
+            showToast('Choisis un nouveau mode d’encaissement.', 'error');
+            return;
+        }
+        if (!reason) {
+            showToast('Motif obligatoire.', 'error');
+            return;
+        }
+        if (normalizePaymentMethodForCompare(currentPaymentMethod) === normalizePaymentMethodForCompare(nextPaymentMethod)) {
+            showToast('Le nouveau mode est identique à l’actuel.', 'error');
+            return;
+        }
+
+        setIsSavingPaymentCorrection(true);
+        try {
+            const label = 'RECTIF ENCAISSEMENT';
+            const orderType = selectedTicket.orderType ?? 'sur_place';
+            const commonPayload = {
+                userRole: session.role,
+                userName: session.username,
+                items: selectedTicket.items,
+                tableLabel: selectedTicket.tableLabel ?? '',
+                orderType,
+                originalOrderId: selectedTicket.id,
+                isCopy: true,
+            } as const;
+
+            // 1) Neutralize original payment allocation (negative line on old method)
+            await saveOrder({
+                ...commonPayload,
+                subtotal: selectedTicket.subtotal * -1,
+                discountAmount: selectedTicket.discountAmount * -1,
+                taxAmount: selectedTicket.taxAmount * -1,
+                total: selectedTicket.total * -1,
+                paymentMethod: currentPaymentMethod,
+                note: `${label} ticket #${selectedTicket.ticketNumber} · annule: ${currentPaymentMethod} · ${reason}`,
+                cashTicketText: `${label}\nTicket origine: #${selectedTicket.ticketNumber}\nAnnule moyen: ${currentPaymentMethod}\nMotif: ${reason}`,
+                kitchenTicketText: `${label}\nTicket origine: #${selectedTicket.ticketNumber}\nAnnule moyen: ${currentPaymentMethod}\nMotif: ${reason}`,
+                orderStatus: 'refund',
+                statusReason: `${label}: ${reason}`,
+            });
+
+            // 2) Re-allocate to corrected payment method (positive line)
+            const correctedSale = await saveOrder({
+                ...commonPayload,
+                subtotal: selectedTicket.subtotal,
+                discountAmount: selectedTicket.discountAmount,
+                taxAmount: selectedTicket.taxAmount,
+                total: selectedTicket.total,
+                paymentMethod: nextPaymentMethod,
+                note: `${label} ticket #${selectedTicket.ticketNumber} · ${currentPaymentMethod} -> ${nextPaymentMethod} · ${reason}`,
+                cashTicketText: `${label}\nTicket origine: #${selectedTicket.ticketNumber}\nAncien: ${currentPaymentMethod}\nNouveau: ${nextPaymentMethod}\nMotif: ${reason}`,
+                kitchenTicketText: `${label}\nTicket origine: #${selectedTicket.ticketNumber}\nAncien: ${currentPaymentMethod}\nNouveau: ${nextPaymentMethod}\nMotif: ${reason}`,
+                orderStatus: 'sale',
+            });
+
+            await refreshStats();
+            setSelectedTicketId(correctedSale.id);
+            await loadRecentTickets();
+            setPaymentCorrectionModalVisible(false);
+            showToast('Encaissement corrigé et tracé.');
+        } catch {
+            showToast('Correction encaissement impossible.', 'error');
+        } finally {
+            setIsSavingPaymentCorrection(false);
+        }
+    };
+
     const submitTicketCorrection = async () => {
+        if (!isAdminRole) {
+            showToast('Annulation ticket réservée admin.', 'error');
+            return;
+        }
         if (!selectedTicket || isSavingCorrection) {
             return;
         }
@@ -3526,52 +4388,54 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                     <Text style={[styles.navBtnText, activeSection === 'stock' && styles.navBtnTextActive]}>📦 Disponibilité</Text>
                                 </Pressable>
 
+                                <Pressable
+                                    style={[styles.navBtn, activeSection === 'tickets' && styles.navBtnActive]}
+                                    onPress={() => { setActiveSection('tickets'); setIsSidebarVisible(true); }}
+                                >
+                                    <Text style={[styles.navBtnText, activeSection === 'tickets' && styles.navBtnTextActive]}>
+                                        🧾 Tickets
+                                    </Text>
+                                </Pressable>
+
+                                {canAccessClosure ? (
+                                    <Pressable
+                                        style={[styles.navBtn, activeSection === 'fermeture' && styles.navBtnActive]}
+                                        onPress={async () => {
+                                            setActiveSection('fermeture');
+                                            setIsSidebarVisible(true);
+                                            // Auto-load X snapshot + period tickets
+                                            try {
+                                                setIsLoadingXReport(true);
+                                                setIsLoadingPeriodTickets(true);
+                                                const [snapshot, periodTickets] = await Promise.all([
+                                                    getCurrentXSnapshot(),
+                                                    getCurrentPeriodTickets(),
+                                                ]);
+                                                setXSnapshot(snapshot);
+                                                setClosurePeriodTickets(periodTickets);
+                                            } catch {
+                                                showToast('Erreur chargement données fermeture.', 'error');
+                                            } finally {
+                                                setIsLoadingXReport(false);
+                                                setIsLoadingPeriodTickets(false);
+                                            }
+                                        }}
+                                    >
+                                        <Text style={[styles.navBtnText, activeSection === 'fermeture' && styles.navBtnTextActive]}>
+                                            🔒 Fermeture
+                                        </Text>
+                                    </Pressable>
+                                ) : null}
+
                                 {isAdminRole ? (
-                                    <>
-                                        <Pressable
-                                            style={[styles.navBtn, activeSection === 'tickets' && styles.navBtnActive]}
-                                            onPress={() => { setActiveSection('tickets'); setIsSidebarVisible(true); }}
-                                        >
-                                            <Text style={[styles.navBtnText, activeSection === 'tickets' && styles.navBtnTextActive]}>
-                                                🧾 Tickets
-                                            </Text>
-                                        </Pressable>
-                                        <Pressable
-                                            style={[styles.navBtn, activeSection === 'fermeture' && styles.navBtnActive]}
-                                            onPress={async () => {
-                                                setActiveSection('fermeture');
-                                                setIsSidebarVisible(true);
-                                                // Auto-load X snapshot + period tickets
-                                                try {
-                                                    setIsLoadingXReport(true);
-                                                    setIsLoadingPeriodTickets(true);
-                                                    const [snapshot, periodTickets] = await Promise.all([
-                                                        getCurrentXSnapshot(),
-                                                        getCurrentPeriodTickets(),
-                                                    ]);
-                                                    setXSnapshot(snapshot);
-                                                    setClosurePeriodTickets(periodTickets);
-                                                } catch {
-                                                    showToast('Erreur chargement données fermeture.', 'error');
-                                                } finally {
-                                                    setIsLoadingXReport(false);
-                                                    setIsLoadingPeriodTickets(false);
-                                                }
-                                            }}
-                                        >
-                                            <Text style={[styles.navBtnText, activeSection === 'fermeture' && styles.navBtnTextActive]}>
-                                                🔒 Fermeture
-                                            </Text>
-                                        </Pressable>
-                                        <Pressable
-                                            style={[styles.navBtn, activeSection === 'parametres' && styles.navBtnActive]}
-                                            onPress={() => { setActiveSection('parametres'); setIsSidebarVisible(true); }}
-                                        >
-                                            <Text style={[styles.navBtnText, activeSection === 'parametres' && styles.navBtnTextActive]}>
-                                                ⚙️ Paramètres
-                                            </Text>
-                                        </Pressable>
-                                    </>
+                                    <Pressable
+                                        style={[styles.navBtn, activeSection === 'parametres' && styles.navBtnActive]}
+                                        onPress={() => { setActiveSection('parametres'); setIsSidebarVisible(true); }}
+                                    >
+                                        <Text style={[styles.navBtnText, activeSection === 'parametres' && styles.navBtnTextActive]}>
+                                            ⚙️ Paramètres
+                                        </Text>
+                                    </Pressable>
                                 ) : null}
                             </View>
                         </View>
@@ -3598,9 +4462,11 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                     {caisseOpenState.isOpen ? '🟢 Caisse ouverte' : '🔴 Caisse fermée'}
                                 </Text>
                                 {caisseOpenState.isOpen && caisseOpenState.openedAt ? (
-                                    <Text style={{ color: COLORS.muted, fontSize: 10 }}>
-                                        Depuis {new Date(caisseOpenState.openedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
-                                    </Text>
+                                    <>
+                                        <Text style={{ color: COLORS.muted, fontSize: 10 }}>
+                                            Depuis {new Date(caisseOpenState.openedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                                        </Text>
+                                    </>
                                 ) : !caisseOpenState.isOpen ? (
                                     <Text style={{ color: COLORS.muted, fontSize: 10 }}>Appuyer pour ouvrir</Text>
                                 ) : null}
@@ -3665,7 +4531,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                                 setCart([]);
                                                 setKitchenSentForCurrentCart(false);
                                                 setServiceSentForCurrentCart(false);
-                                                setCurrentOrderTicketNumber(null);
+                                                setCurrentOrderTicketNumberValue(null);
                                                 resetComposedMenu();
                                                 showToast('Panier vidé');
                                             },
@@ -3808,6 +4674,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                 style={[styles.primaryBtn, { flex: 1 }, isBusy && styles.primaryBtnDisabled]}
                                 onPress={() => {
                                     if (!isBusy) {
+                                        if (!ensureCaisseOpen('encaissement')) return;
                                         setPayChoiceOpen(true);
                                         // À l'appui sur Payer, on déclenche cuisine + salle ensemble.
                                         if (cart.length && (!kitchenSentForCurrentCart || !serviceSentForCurrentCart)) {
@@ -3886,50 +4753,121 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                                 onPress={() => handleMenuFlowChange(flow)}
                                             >
                                                 <Text style={[styles.menuTypeBtnText, menuFlowType === flow && styles.menuTypeBtnTextActive]}>
-                                                    {MENU_FLOW_LABELS[flow]}
+                                                    {MENU_FLOW_BUTTON_LABELS[flow]}
                                                 </Text>
                                             </Pressable>
                                         ))}
                                     </View>
 
-                                    <View style={styles.menuStageRow}>
-                                        {currentMenuStages.map((stage) => {
-                                            const disabled = !canOpenStage(stage);
-                                            return (
-                                                <Pressable
-                                                    key={stage}
-                                                    style={[
-                                                        styles.menuStageBtn,
-                                                        menuStage === stage && styles.menuStageBtnActive,
-                                                        disabled && styles.menuStageBtnLocked,
-                                                    ]}
-                                                    onPress={() => setMenuStage(stage)}
-                                                    disabled={disabled}
-                                                >
-                                                    <Text style={[styles.menuStageText, menuStage === stage && styles.menuStageTextActive]}>
-                                                        {MENU_STAGE_LABELS[stage]}
-                                                    </Text>
-                                                </Pressable>
-                                            );
-                                        })}
-                                    </View>
+                                    {isEditionLimiteeSimpleMode ? (
+                                        <Text style={{ color: COLORS.muted, fontSize: 11, marginTop: 8 }}>
+                                            Mode simple: un appui ajoute directement l'article au panier.
+                                        </Text>
+                                    ) : (
+                                        <View style={styles.menuStageRow}>
+                                            {currentMenuStages.map((stage) => {
+                                                const disabled = !canOpenStage(stage);
+                                                return (
+                                                    <Pressable
+                                                        key={stage}
+                                                        style={[
+                                                            styles.menuStageBtn,
+                                                            menuStage === stage && styles.menuStageBtnActive,
+                                                            disabled && styles.menuStageBtnLocked,
+                                                        ]}
+                                                        onPress={() => setMenuStage(stage)}
+                                                        disabled={disabled}
+                                                    >
+                                                        <Text style={[styles.menuStageText, menuStage === stage && styles.menuStageTextActive]}>
+                                                            {MENU_STAGE_LABELS[stage]}
+                                                        </Text>
+                                                    </Pressable>
+                                                );
+                                            })}
+                                        </View>
+                                    )}
 
                                     <FlatList
-                                        data={menuDisplayedProducts}
+                                        data={menuGridProducts}
+                                        key={`menu-grid-${productGridColumns}`}
                                         keyExtractor={(item) => item.id}
-                                        numColumns={4}
+                                        numColumns={productGridColumns}
                                         style={styles.productsList}
                                         contentContainerStyle={styles.productsGrid}
-                                        columnWrapperStyle={styles.productsRow}
-                                        renderItem={({ item }) => {
-                                            const isSelected =
-                                                item.id === selectedMenuMainId || item.id === selectedMenuSideId || item.id === selectedMenuDrinkId || item.id === selectedMenuSauceId || item.id === selectedMenuDessertId || item.id === selectedMenuToyId;
+                                        columnWrapperStyle={productGridColumns > 1 ? styles.productsRow : undefined}
+                                        renderItem={({ item, index }) => {
+                                            const isSelected = !isEditionLimiteeSimpleMode && (
+                                                item.id === selectedMenuMainId
+                                                || item.id === selectedMenuSideId
+                                                || item.id === selectedMenuDrinkId
+                                                || item.id === selectedMenuSauceId
+                                                || item.id === selectedMenuDessertId
+                                                || item.id === selectedMenuToyId
+                                            );
+                                            const burgerFamilyLabel = getBurgerFamilyLabel(item);
+                                            const showFamilySeparator = shouldShowMenuBurgerFamilySeparators
+                                                && isBurgerFamilyBreak(menuGridProducts, index);
                                             return (
-                                                <Pressable
-                                                    style={[styles.productCard, isSelected && styles.productCardSelected]}
-                                                    onPress={() => handlePickMenuProduct(item)}
-                                                    android_ripple={{ color: '#39FF5A33' }}
-                                                >
+                                                <View style={[styles.productCardWrap, { width: productCardWidth }]}>
+                                                    {showFamilySeparator && burgerFamilyLabel ? (
+                                                        <View style={styles.productFamilySection}>
+                                                            <View style={styles.productFamilySectionLine} />
+                                                            <Text style={styles.productFamilySectionTitle}>{burgerFamilyLabel}</Text>
+                                                            <View style={styles.productFamilySectionLine} />
+                                                        </View>
+                                                    ) : null}
+                                                    <Pressable
+                                                        style={[styles.productCard, isSelected && styles.productCardSelected]}
+                                                        onPress={() => {
+                                                            if (isEditionLimiteeSimpleMode) {
+                                                                addProductToCart(item);
+                                                                return;
+                                                            }
+                                                            handlePickMenuProduct(item);
+                                                        }}
+                                                        android_ripple={{ color: '#39FF5A33' }}
+                                                    >
+                                                        {getProductImage(item) ? (
+                                                            <Image source={getProductImage(item)} contentFit="cover" style={styles.productImage} />
+                                                        ) : (
+                                                            <View style={[styles.productImage, styles.imageFallback]} />
+                                                        )}
+                                                        <Text numberOfLines={2} style={styles.productName}>
+                                                            {item.name}
+                                                        </Text>
+                                                        <Text style={styles.productPrice}>{item.price.toFixed(2)}€</Text>
+                                                        {!isEditionLimiteeSimpleMode && (item.menuSupplement ?? 0) > 0 ? (
+                                                            <Text style={styles.productSupplement}>+{item.menuSupplement!.toFixed(2)}€ suppl.</Text>
+                                                        ) : null}
+                                                    </Pressable>
+                                                </View>
+                                            );
+                                        }}
+                                    />
+                                </View>
+                            ) : (
+                                <FlatList
+                                    data={filteredProducts}
+                                    key={`solo-grid-${productGridColumns}`}
+                                    keyExtractor={(item) => item.id}
+                                    numColumns={productGridColumns}
+                                    style={styles.productsList}
+                                    contentContainerStyle={styles.productsGrid}
+                                    columnWrapperStyle={productGridColumns > 1 ? styles.productsRow : undefined}
+                                    renderItem={({ item, index }) => {
+                                        const burgerFamilyLabel = getBurgerFamilyLabel(item);
+                                        const showFamilySeparator = shouldShowSoloBurgerFamilySeparators
+                                            && isBurgerFamilyBreak(filteredProducts, index);
+                                        return (
+                                            <View style={[styles.productCardWrap, { width: productCardWidth }]}>
+                                                {showFamilySeparator && burgerFamilyLabel ? (
+                                                    <View style={styles.productFamilySection}>
+                                                        <View style={styles.productFamilySectionLine} />
+                                                        <Text style={styles.productFamilySectionTitle}>{burgerFamilyLabel}</Text>
+                                                        <View style={styles.productFamilySectionLine} />
+                                                    </View>
+                                                ) : null}
+                                                <Pressable style={styles.productCard} onPress={() => addProductToCart(item)} android_ripple={{ color: '#39FF5A33' }}>
                                                     {getProductImage(item) ? (
                                                         <Image source={getProductImage(item)} contentFit="cover" style={styles.productImage} />
                                                     ) : (
@@ -3939,35 +4877,8 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                                         {item.name}
                                                     </Text>
                                                     <Text style={styles.productPrice}>{item.price.toFixed(2)}€</Text>
-                                                    {(item.menuSupplement ?? 0) > 0 ? (
-                                                        <Text style={styles.productSupplement}>+{item.menuSupplement!.toFixed(2)}€ suppl.</Text>
-                                                    ) : null}
                                                 </Pressable>
-                                            );
-                                        }}
-                                    />
-                                </View>
-                            ) : (
-                                <FlatList
-                                    data={filteredProducts}
-                                    keyExtractor={(item) => item.id}
-                                    numColumns={4}
-                                    style={styles.productsList}
-                                    contentContainerStyle={styles.productsGrid}
-                                    columnWrapperStyle={styles.productsRow}
-                                    renderItem={({ item }) => {
-                                        return (
-                                            <Pressable style={styles.productCard} onPress={() => addProductToCart(item)} android_ripple={{ color: '#39FF5A33' }}>
-                                                {getProductImage(item) ? (
-                                                    <Image source={getProductImage(item)} contentFit="cover" style={styles.productImage} />
-                                                ) : (
-                                                    <View style={[styles.productImage, styles.imageFallback]} />
-                                                )}
-                                                <Text numberOfLines={2} style={styles.productName}>
-                                                    {item.name}
-                                                </Text>
-                                                <Text style={styles.productPrice}>{item.price.toFixed(2)}€</Text>
-                                            </Pressable>
+                                            </View>
                                         );
                                     }}
                                 />
@@ -3987,6 +4898,11 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                             ) : null}
                             <View style={styles.stockHeader}>
                                 <Text style={styles.panelTitle}>Disponibilité produits</Text>
+                                {isAdminRole ? (
+                                    <Pressable style={styles.stockAddBtn} onPress={() => openProductForm()}>
+                                        <Text style={styles.stockAddBtnText}>+ Ajouter</Text>
+                                    </Pressable>
+                                ) : null}
                             </View>
 
                             <View style={styles.stockFilters}>
@@ -4046,6 +4962,16 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                                 >
                                                     <Text style={styles.stockToggleText}>{item.active ? 'Actif' : 'Inactif'}</Text>
                                                 </Pressable>
+                                                {isAdminRole ? (
+                                                    <>
+                                                        <Pressable style={styles.stockEditBtn} onPress={() => openProductForm(item)}>
+                                                            <Text style={styles.stockEditBtnText}>✎</Text>
+                                                        </Pressable>
+                                                        <Pressable style={styles.stockDeleteBtn} onPress={() => handleDeleteProduct(item)}>
+                                                            <Text style={styles.stockDeleteBtnText}>🗑</Text>
+                                                        </Pressable>
+                                                    </>
+                                                ) : null}
                                             </View>
                                         </View>
                                     ))
@@ -4056,7 +4982,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                         </View>
                     ) : null}
 
-                    {activeSection === 'tickets' && session.role === 'admin' ? (
+                    {activeSection === 'tickets' ? (
                         <View style={styles.salesPanel}>
                             {!isSidebarVisible ? (
                                 <View style={styles.salesTopRow}>
@@ -4152,11 +5078,18 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                                     </Text>
                                                 </Pressable>
                                                 <Pressable
-                                                    style={[styles.ticketCorrectionBtn, !canCorrectSelectedTicket && styles.primaryBtnDisabled]}
+                                                    style={[styles.ticketCorrectionBtn, (!isAdminRole || !canCorrectSelectedTicket) && styles.primaryBtnDisabled]}
                                                     onPress={() => openTicketCorrection('cancel')}
-                                                    disabled={!canCorrectSelectedTicket}
+                                                    disabled={!isAdminRole || !canCorrectSelectedTicket}
                                                 >
                                                     <Text style={styles.ticketActionBtnText} numberOfLines={2}>Annuler ticket</Text>
+                                                </Pressable>
+                                                <Pressable
+                                                    style={[styles.ticketPaymentEditBtn, (!isAdminRole || !canEditPaymentSelectedTicket) && styles.primaryBtnDisabled]}
+                                                    onPress={openPaymentCorrectionModal}
+                                                    disabled={!isAdminRole || !canEditPaymentSelectedTicket}
+                                                >
+                                                    <Text style={styles.ticketActionBtnText} numberOfLines={2}>Modifier encaissement</Text>
                                                 </Pressable>
                                             </View>
                                         </>
@@ -4168,7 +5101,7 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                         </View>
                     ) : null}
 
-                    {activeSection === 'fermeture' && session.role === 'admin' ? (
+                    {activeSection === 'fermeture' && canAccessClosure ? (
                         <View style={styles.salesPanel}>
                             {!isSidebarVisible ? (
                                 <View style={styles.salesTopRow}>
@@ -4315,70 +5248,6 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                     );
                                 })() : null}
 
-                                {/* ══════ Comptage fond de caisse ══════ */}
-                                <View style={styles.reportCard}>
-                                    <Text style={styles.reportTitle}>💰 Comptage fond de caisse</Text>
-                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginBottom: 6 }}>
-                                        Comptez les espèces dans le tiroir-caisse et saisissez le montant
-                                    </Text>
-                                    <TextInput
-                                        style={[styles.input, { fontSize: 18, textAlign: 'center', fontWeight: '700' }]}
-                                        value={cashCountInput}
-                                        onChangeText={setCashCountInput}
-                                        placeholder="Montant espèces comptées"
-                                        placeholderTextColor={COLORS.muted}
-                                        keyboardType="decimal-pad"
-                                    />
-                                    {(() => {
-                                        // Agrège les espèces y compris des paiements mixtes
-                                        let esperesTheoriques = 0;
-                                        if (xSnapshot) {
-                                            for (const [rawKey, totalAmount] of Object.entries(xSnapshot.paymentBreakdown)) {
-                                                const parts = rawKey.split(' / ');
-                                                if (parts.length > 1) {
-                                                    for (const part of parts) {
-                                                        const match = part.match(/^(.+?)\s+([\d.,]+)\s*€?$/);
-                                                        if (match && (match[1].trim() === 'Espèces' || match[1].trim().toLowerCase() === 'especes')) {
-                                                            esperesTheoriques += parseFloat(match[2].replace(',', '.')) || 0;
-                                                        }
-                                                    }
-                                                } else {
-                                                    const norm = rawKey.trim().toLowerCase();
-                                                    if (norm === 'espèces' || norm === 'especes') {
-                                                        esperesTheoriques += totalAmount;
-                                                    }
-                                                }
-                                            }
-                                            esperesTheoriques = Number(esperesTheoriques.toFixed(2));
-                                        }
-                                        const counted = parseFloat(cashCountInput || '0');
-                                        const variance = counted - esperesTheoriques;
-                                        if (cashCountInput && counted >= 0 && xSnapshot) {
-                                            return (
-                                                <View style={{ marginTop: 8, gap: 4 }}>
-                                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                                                        <Text style={{ color: COLORS.muted, fontSize: 12 }}>Espèces théoriques :</Text>
-                                                        <Text style={{ color: COLORS.text, fontSize: 12, fontWeight: '700' }}>{esperesTheoriques.toFixed(2)}€</Text>
-                                                    </View>
-                                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                                                        <Text style={{ color: COLORS.muted, fontSize: 12 }}>Espèces comptées :</Text>
-                                                        <Text style={{ color: COLORS.text, fontSize: 12, fontWeight: '700' }}>{counted.toFixed(2)}€</Text>
-                                                    </View>
-                                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', backgroundColor: Math.abs(variance) < 0.01 ? '#102417' : '#2C1919', borderRadius: 8, padding: 8, marginTop: 4 }}>
-                                                        <Text style={{ color: Math.abs(variance) < 0.01 ? COLORS.accent : COLORS.danger, fontSize: 14, fontWeight: '800' }}>
-                                                            Écart :
-                                                        </Text>
-                                                        <Text style={{ color: Math.abs(variance) < 0.01 ? COLORS.accent : COLORS.danger, fontSize: 14, fontWeight: '800' }}>
-                                                            {variance >= 0 ? '+' : ''}{variance.toFixed(2)}€
-                                                        </Text>
-                                                    </View>
-                                                </View>
-                                            );
-                                        }
-                                        return null;
-                                    })()}
-                                </View>
-
                                 {/* ══════ Liste des tickets de la période ══════ */}
                                 <View style={styles.reportCard}>
                                     <Text style={styles.reportTitle}>🧾 Tickets de la période ({closurePeriodTickets.length})</Text>
@@ -4438,6 +5307,15 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                             {isClosingZReport ? 'Clôture en cours…' : '🔒 Clôturer la période Z + Imprimer'}
                                         </Text>
                                     </Pressable>
+                                    <Pressable
+                                        style={[styles.secondaryBtn, { marginTop: 8 }, (isPrintingZTicketPreview || isClosingZReport) && styles.primaryBtnDisabled]}
+                                        onPress={handlePrintZTicketPreview}
+                                        disabled={isPrintingZTicketPreview || isClosingZReport}
+                                    >
+                                        <Text style={styles.secondaryBtnText}>
+                                            {isPrintingZTicketPreview ? 'Impression…' : '🖨️ Imprimer le ticket de clôture (sans clôturer)'}
+                                        </Text>
+                                    </Pressable>
                                     <Text style={{ color: COLORS.muted, fontSize: 10, marginTop: 4, textAlign: 'center' }}>
                                         Cette action ferme la période, imprime le rapport Z et lance un audit d'intégrité.
                                     </Text>
@@ -4494,23 +5372,37 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                     {zClosures.length > 0 ? (
                                         <ScrollView style={{ maxHeight: 300, marginTop: 8 }} nestedScrollEnabled>
                                             {zClosures.map((closure) => (
-                                                <Pressable
-                                                    key={closure.id}
-                                                    style={styles.closureRow}
-                                                    onPress={() => setFullscreenTicketText(buildClosurePreviewText(closure))}
-                                                    android_ripple={{ color: '#39FF5A33' }}
-                                                >
-                                                    <Text style={styles.closureRowTitle}>
-                                                        Z #{closure.id} — {closure.ordersCount} tickets — {closure.revenue.toFixed(2)}€
-                                                    </Text>
-                                                    <Text style={styles.closureRowText}>
-                                                        Fermée le {new Date(closure.closedAt).toLocaleString('fr-FR')} par {closure.closedBy}
-                                                    </Text>
-                                                    <Text style={styles.closureRowHash}>
-                                                        Hash: {closure.signatureHash.slice(0, 16)}…
-                                                    </Text>
-                                                    <Text style={{ color: COLORS.accent, fontSize: 10, marginTop: 2 }}>Appuyer pour voir le ticket ›</Text>
-                                                </Pressable>
+                                                <View key={closure.id} style={styles.closureRow}>
+                                                    <Pressable
+                                                        style={styles.closurePreviewPress}
+                                                        onPress={() => setFullscreenTicketText(buildClosurePreviewText(closure))}
+                                                        android_ripple={{ color: '#39FF5A33' }}
+                                                    >
+                                                        <Text style={styles.closureRowTitle}>
+                                                            Z #{closure.id} — {closure.ordersCount} tickets — {closure.revenue.toFixed(2)}€
+                                                        </Text>
+                                                        <Text style={styles.closureRowText}>
+                                                            Fermée le {new Date(closure.closedAt).toLocaleString('fr-FR')} par {closure.closedBy}
+                                                        </Text>
+                                                        <Text style={styles.closureRowHash}>
+                                                            Hash: {closure.signatureHash.slice(0, 16)}…
+                                                        </Text>
+                                                        <Text style={{ color: COLORS.accent, fontSize: 10, marginTop: 2 }}>Appuyer pour voir le ticket ›</Text>
+                                                    </Pressable>
+                                                    <Pressable
+                                                        style={[
+                                                            styles.secondaryBtn,
+                                                            styles.closurePrintBtn,
+                                                            (isClosingZReport || isPrintingClosedFlashId === closure.id) && styles.primaryBtnDisabled,
+                                                        ]}
+                                                        onPress={() => void handlePrintClosedFlashTicket(closure)}
+                                                        disabled={isClosingZReport || isPrintingClosedFlashId === closure.id}
+                                                    >
+                                                        <Text style={styles.secondaryBtnText}>
+                                                            {isPrintingClosedFlashId === closure.id ? 'Impression…' : '🖨️ Imprimer le flash'}
+                                                        </Text>
+                                                    </Pressable>
+                                                </View>
                                             ))}
                                         </ScrollView>
                                     ) : (
@@ -4734,6 +5626,18 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                 <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.serviceTicketEnabled ? 'Activé' : 'Désactivé'}</Text>
                             </Pressable>
 
+                            {/* ── Toggle tiroir-caisse physique ── */}
+                            <Pressable
+                                style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.cashDrawerEnabled ? '#1A3A1A' : '#1F1F1F' }}
+                                onPress={() => setSettings((prev) => ({ ...prev, cashDrawerEnabled: !prev.cashDrawerEnabled }))}
+                            >
+                                <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.cashDrawerEnabled ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                    <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.cashDrawerEnabled ? 'flex-end' : 'flex-start' }} />
+                                </View>
+                                <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Tiroir-caisse physique</Text>
+                                <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.cashDrawerEnabled ? 'Utilisé' : 'Non utilisé'}</Text>
+                            </Pressable>
+
                             <View style={styles.reportActionsRow}>
                                 <Pressable
                                     style={[styles.secondaryBtn, isTestingCashPrinter && styles.primaryBtnDisabled]}
@@ -4751,6 +5655,34 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                 </Pressable>
                             </View>
 
+                            <View style={styles.reportActionsRow}>
+                                <Pressable
+                                    style={[
+                                        styles.secondaryBtn,
+                                        !settings.cashDrawerEnabled && styles.primaryBtnDisabled,
+                                        isTestingCashDrawer && styles.primaryBtnDisabled,
+                                    ]}
+                                    onPress={handleTestCashDrawer}
+                                    disabled={isTestingCashDrawer || !settings.cashDrawerEnabled}
+                                >
+                                    <Text style={styles.secondaryBtnText}>{isTestingCashDrawer ? 'Test tiroir…' : 'Tester ouverture tiroir'}</Text>
+                                </Pressable>
+                            </View>
+                            {cashDrawerTestStatus ? (
+                                <View style={{ marginTop: 8, backgroundColor: '#0E0E0E', borderRadius: 8, borderWidth: 1, borderColor: '#1F1F1F', padding: 10, gap: 4 }}>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11 }}>
+                                        Dernier test tiroir: {cashDrawerTestStatus.testedAt}
+                                    </Text>
+                                    <Text style={{ color: cashDrawerTestStatus.commandOk ? COLORS.accent : COLORS.danger, fontSize: 12, fontWeight: '700' }}>
+                                        Commande ouverture: {cashDrawerTestStatus.commandOk ? 'OK' : 'KO'}
+                                    </Text>
+                                    <Text style={{ color: COLORS.text, fontSize: 12 }}>
+                                        Ouverture constatée: {cashDrawerTestStatus.operatorConfirmedOpen === null ? 'Non confirmée' : cashDrawerTestStatus.operatorConfirmedOpen ? 'Oui' : 'Non'}
+                                    </Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11 }}>{cashDrawerTestStatus.message}</Text>
+                                </View>
+                            ) : null}
+
                             <View style={[styles.payRow, { marginTop: 14 }]}>
                                 <Pressable style={[styles.secondaryBtn, { backgroundColor: COLORS.accent }]} onPress={handleSaveSettings}>
                                     <Text style={[styles.secondaryBtnText, { color: '#000', fontWeight: '800' }]}>💾 Sauvegarder imprimantes</Text>
@@ -4766,6 +5698,191 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                 >
                                     <Text style={styles.secondaryBtnText}>↻ Relancer file impression</Text>
                                 </Pressable>
+                            </View>
+
+                            <View style={[styles.reportCard, { marginTop: 12 }]}>
+                                <Text style={styles.reportTitle}>🧾 Personnalisation ticket</Text>
+                                <Text style={{ color: COLORS.muted, fontSize: 11, marginTop: 4 }}>
+                                    Mode actif: {settings.printMode === 'usb_single' ? 'USB (1 imprimante)' : 'Réseau (2 imprimantes)'}.
+                                </Text>
+                                <Text style={{ color: COLORS.muted, fontSize: 11, marginTop: 2 }}>
+                                    En mode USB, caisse/cuisine/salle partent vers la meme imprimante.
+                                </Text>
+
+                                <Text style={{ color: COLORS.muted, fontSize: 11, marginTop: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                                    En-tete
+                                </Text>
+                                <TextInput
+                                    style={[styles.input, { marginBottom: 8 }]}
+                                    value={settings.ticketCustomization.businessName}
+                                    onChangeText={(value) => updateTicketCustomization({ businessName: value })}
+                                    placeholder="Nom enseigne"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+                                <TextInput
+                                    style={[styles.input, { marginBottom: 8 }]}
+                                    value={settings.ticketCustomization.businessAddress}
+                                    onChangeText={(value) => updateTicketCustomization({ businessAddress: value })}
+                                    placeholder="Adresse"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+                                <TextInput
+                                    style={[styles.input, { marginBottom: 8 }]}
+                                    value={settings.ticketCustomization.businessSiret}
+                                    onChangeText={(value) => updateTicketCustomization({ businessSiret: value })}
+                                    placeholder="SIRET"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+                                <TextInput
+                                    style={[styles.input, { marginBottom: 8 }]}
+                                    value={settings.ticketCustomization.businessTvaIntra}
+                                    onChangeText={(value) => updateTicketCustomization({ businessTvaIntra: value })}
+                                    placeholder="TVA intracom"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+                                <TextInput
+                                    style={[styles.input, { marginBottom: 8 }]}
+                                    value={settings.ticketCustomization.businessPhone}
+                                    onChangeText={(value) => updateTicketCustomization({ businessPhone: value })}
+                                    placeholder="Téléphone"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+
+                                <Text style={{ color: COLORS.muted, fontSize: 11, marginTop: 8, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                                    Pied de ticket
+                                </Text>
+                                <TextInput
+                                    style={[styles.input, { marginBottom: 8 }]}
+                                    value={settings.ticketCustomization.footerLine1}
+                                    onChangeText={(value) => updateTicketCustomization({ footerLine1: value })}
+                                    placeholder="Ligne 1 (ex: Bon appetit !)"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+                                <TextInput
+                                    style={styles.input}
+                                    value={settings.ticketCustomization.footerLine2}
+                                    onChangeText={(value) => updateTicketCustomization({ footerLine2: value })}
+                                    placeholder="Ligne 2 (ex: Merci de votre visite !)"
+                                    placeholderTextColor={COLORS.muted}
+                                    maxLength={120}
+                                />
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.showLogo ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('showLogo')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.showLogo ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.showLogo ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Afficher logo</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.showLogo ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.headerBold ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('headerBold')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.headerBold ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.headerBold ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>En-tête en gras</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.headerBold ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.footerBold ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('footerBold')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.footerBold ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.footerBold ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Pied de ticket en gras</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.footerBold ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.showSeller ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('showSeller')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.showSeller ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.showSeller ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Afficher vendeur</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.showSeller ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.showTable ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('showTable')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.showTable ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.showTable ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Afficher table</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.showTable ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.showPaymentLine ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('showPaymentLine')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.showPaymentLine ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.showPaymentLine ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Afficher mode de paiement</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.showPaymentLine ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.showTaxTable ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('showTaxTable')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.showTaxTable ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.showTaxTable ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Afficher tableau TVA</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.showTaxTable ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <Pressable
+                                    style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: COLORS.cardSoft, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: settings.ticketCustomization.compactMode ? '#1A3A1A' : '#1F1F1F' }}
+                                    onPress={() => toggleTicketCustomizationFlag('compactMode')}
+                                >
+                                    <View style={{ width: 40, height: 24, borderRadius: 12, backgroundColor: settings.ticketCustomization.compactMode ? COLORS.accent : '#333', justifyContent: 'center', paddingHorizontal: 2 }}>
+                                        <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: settings.ticketCustomization.compactMode ? 'flex-end' : 'flex-start' }} />
+                                    </View>
+                                    <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '600', marginLeft: 10 }}>Mode compact (moins de lignes)</Text>
+                                    <Text style={{ color: COLORS.muted, fontSize: 11, marginLeft: 'auto' }}>{settings.ticketCustomization.compactMode ? 'Oui' : 'Non'}</Text>
+                                </Pressable>
+
+                                <View style={[styles.reportActionsRow, { marginTop: 10 }]}>
+                                    <Pressable style={styles.secondaryBtn} onPress={() => openTicketCustomizationPreview('cash')}>
+                                        <Text style={styles.secondaryBtnText}>Aperçu caisse</Text>
+                                    </Pressable>
+                                    <Pressable style={styles.secondaryBtn} onPress={() => openTicketCustomizationPreview('kitchen')}>
+                                        <Text style={styles.secondaryBtnText}>Aperçu cuisine</Text>
+                                    </Pressable>
+                                    <Pressable style={styles.secondaryBtn} onPress={() => openTicketCustomizationPreview('service')}>
+                                        <Text style={styles.secondaryBtnText}>Aperçu salle</Text>
+                                    </Pressable>
+                                </View>
+                                <View style={[styles.reportActionsRow, { marginTop: 8 }]}>
+                                    <Pressable
+                                        style={styles.secondaryBtn}
+                                        onPress={() => {
+                                            updateTicketCustomization({ ...DEFAULT_TICKET_CUSTOMIZATION });
+                                            showToast('Personnalisation ticket réinitialisée.');
+                                        }}
+                                    >
+                                        <Text style={styles.secondaryBtnText}>Réinitialiser</Text>
+                                    </Pressable>
+                                </View>
                             </View>
 
                             {/* ── Majoration nuit ── */}
@@ -4860,7 +5977,12 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                             backgroundColor: '#111', borderWidth: 1.5, borderColor: '#252525',
                                         }}
                                         onPress={async () => {
-                                            await savePrinterSettings(settings);
+                                            const nextSettings: PrinterSettings = {
+                                                ...settings,
+                                                ticketCustomization: normalizeTicketCustomization(settings.ticketCustomization),
+                                            };
+                                            await savePrinterSettings(nextSettings);
+                                            setSettings(nextSettings);
                                             showToast('Paramètre majoration sauvegardé ✓');
                                         }}
                                     >
@@ -5345,6 +6467,198 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                 </View>
             </Modal>
 
+            <Modal visible={sundaeModalVisible} transparent animationType="fade">
+                <View style={styles.correctionBackdrop}>
+                    <Pressable style={StyleSheet.absoluteFill} onPress={closeSundaeModal} />
+                    <View style={styles.otherPayCard}>
+                        <Text style={styles.correctionTitle}>
+                            🍨 Options Sundae — {sundaeProduct?.name ?? 'Sundae'}
+                        </Text>
+                        <Text style={styles.correctionSub}>Nappage (1 choix)</Text>
+                        <View style={styles.otherPayGrid}>
+                            {SUNDAE_NAPPAGE_OPTIONS.map((nappageLabel) => (
+                                <Pressable
+                                    key={nappageLabel}
+                                    style={[
+                                        styles.otherPayOption,
+                                        sundaeNappageSelection === nappageLabel
+                                        && { borderColor: COLORS.accent, backgroundColor: COLORS.accentSoft, borderWidth: 1.5 },
+                                    ]}
+                                    onPress={() => setSundaeNappageSelection(nappageLabel)}
+                                    android_ripple={{ color: '#39FF5A33' }}
+                                >
+                                    <Text style={styles.otherPayOptionIcon}>🍯</Text>
+                                    <Text style={styles.otherPayOptionLabel}>{nappageLabel}</Text>
+                                </Pressable>
+                            ))}
+                        </View>
+
+                        <Text style={[styles.correctionSub, { marginTop: 10 }]}>
+                            Croquant (0 à {MAX_SUNDAE_CROQUANTS} choix)
+                        </Text>
+                        <View style={styles.otherPayGrid}>
+                            {SUNDAE_CROQUANT_OPTIONS.map((croquantLabel) => {
+                                const isSelected = sundaeCroquantSelections.includes(croquantLabel);
+                                const hasSansCroquant = sundaeCroquantSelections.includes('Sans Croquant');
+                                const selectedCroquantsCount = sundaeCroquantSelections.filter((entry) => entry !== 'Sans Croquant').length;
+                                const isSansCroquantOption = croquantLabel === 'Sans Croquant';
+                                const isDisabled = !isSelected
+                                    && (
+                                        (isSansCroquantOption && selectedCroquantsCount > 0)
+                                        || (!isSansCroquantOption && (hasSansCroquant || selectedCroquantsCount >= MAX_SUNDAE_CROQUANTS))
+                                    );
+
+                                return (
+                                    <Pressable
+                                        key={croquantLabel}
+                                        style={[
+                                            styles.otherPayOption,
+                                            isSelected && { borderColor: COLORS.accent, backgroundColor: COLORS.accentSoft, borderWidth: 1.5 },
+                                            isDisabled && { opacity: 0.45 },
+                                        ]}
+                                        onPress={() => toggleSundaeCroquant(croquantLabel)}
+                                        disabled={isDisabled}
+                                        android_ripple={{ color: '#39FF5A33' }}
+                                    >
+                                        <Text style={styles.otherPayOptionIcon}>🍫</Text>
+                                        <Text style={styles.otherPayOptionLabel}>{croquantLabel}</Text>
+                                    </Pressable>
+                                );
+                            })}
+                        </View>
+
+                        <Pressable
+                            style={[
+                                styles.primaryBtn,
+                                { marginTop: 10 },
+                                !sundaeNappageSelection && styles.primaryBtnDisabled,
+                            ]}
+                            onPress={addSundaeWithOptions}
+                            disabled={!sundaeNappageSelection}
+                        >
+                            <Text style={styles.primaryBtnText}>✅ Ajouter au panier</Text>
+                        </Pressable>
+                        <Pressable
+                            style={[styles.secondaryBtn, { marginTop: 10 }]}
+                            onPress={closeSundaeModal}
+                        >
+                            <Text style={styles.secondaryBtnText}>Annuler</Text>
+                        </Pressable>
+                    </View>
+                </View>
+            </Modal>
+
+            <Modal visible={saladModalVisible} transparent animationType="fade">
+                <View style={styles.correctionBackdrop}>
+                    <Pressable style={StyleSheet.absoluteFill} onPress={closeSaladModal} />
+                    <View style={styles.otherPayCard}>
+                        <Text style={styles.correctionTitle}>
+                            🥗 Composition salade — {saladProduct?.name ?? 'Salade'}
+                        </Text>
+                        <Text style={styles.correctionSub}>Choisir 1 protéine et 1 sauce</Text>
+
+                        <Text style={[styles.correctionSub, { marginTop: 10, fontWeight: '700' }]}>Protéine</Text>
+                        <View style={styles.otherPayGrid}>
+                            {SALAD_PROTEIN_OPTIONS.map((proteinLabel) => (
+                                <Pressable
+                                    key={proteinLabel}
+                                    style={[
+                                        styles.otherPayOption,
+                                        saladProteinSelection === proteinLabel
+                                        && { borderColor: COLORS.accent, backgroundColor: COLORS.accentSoft, borderWidth: 1.5 },
+                                    ]}
+                                    onPress={() => setSaladProteinSelection(proteinLabel)}
+                                    android_ripple={{ color: '#39FF5A33' }}
+                                >
+                                    <Text style={styles.otherPayOptionIcon}>🥗</Text>
+                                    <Text style={styles.otherPayOptionLabel}>{proteinLabel}</Text>
+                                </Pressable>
+                            ))}
+                        </View>
+
+                        <Text style={[styles.correctionSub, { marginTop: 10, fontWeight: '700' }]}>Sauce</Text>
+                        <View style={styles.otherPayGrid}>
+                            {SALAD_SAUCE_OPTIONS.map((sauceLabel) => (
+                                <Pressable
+                                    key={sauceLabel}
+                                    style={[
+                                        styles.otherPayOption,
+                                        saladSauceSelection === sauceLabel
+                                        && { borderColor: COLORS.accent, backgroundColor: COLORS.accentSoft, borderWidth: 1.5 },
+                                    ]}
+                                    onPress={() => setSaladSauceSelection(sauceLabel)}
+                                    android_ripple={{ color: '#39FF5A33' }}
+                                >
+                                    <Text style={styles.otherPayOptionIcon}>🥣</Text>
+                                    <Text style={styles.otherPayOptionLabel}>{sauceLabel}</Text>
+                                </Pressable>
+                            ))}
+                        </View>
+
+                        <Pressable
+                            style={[
+                                styles.primaryBtn,
+                                { marginTop: 10 },
+                                (!saladProteinSelection || !saladSauceSelection) && styles.primaryBtnDisabled,
+                            ]}
+                            onPress={addSaladWithComposition}
+                            disabled={!saladProteinSelection || !saladSauceSelection}
+                        >
+                            <Text style={styles.primaryBtnText}>
+                                {saladSelectionTarget === 'menu_main' ? '✅ Valider le menu' : '✅ Ajouter au panier'}
+                            </Text>
+                        </Pressable>
+                        <Pressable
+                            style={[styles.secondaryBtn, { marginTop: 10 }]}
+                            onPress={closeSaladModal}
+                        >
+                            <Text style={styles.secondaryBtnText}>Annuler</Text>
+                        </Pressable>
+                    </View>
+                </View>
+            </Modal>
+
+            <Modal visible={editionLimiteeModeModalVisible} transparent animationType="fade">
+                <View style={styles.correctionBackdrop}>
+                    <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditionLimiteeModeModalVisible(false)} />
+                    <View style={[styles.otherPayCard, styles.editionModeCard]}>
+                        <Text style={styles.correctionTitle}>✨ Edition Limitee</Text>
+                        <Text style={styles.correctionSub}>
+                            Choisir comment tu veux travailler ce catalogue.
+                        </Text>
+
+                        <Pressable
+                            style={[styles.editionModeOption, styles.editionModeOptionMenu]}
+                            onPress={() => applyEditionLimiteeSelectionMode('menu')}
+                            android_ripple={{ color: '#39FF5A33' }}
+                        >
+                            <Text style={styles.editionModeOptionTitle}>🧩 Mode Menu</Text>
+                            <Text style={styles.editionModeOptionSub}>
+                                Composition guidée: principal + accompagnement + boisson.
+                            </Text>
+                        </Pressable>
+
+                        <Pressable
+                            style={styles.editionModeOption}
+                            onPress={() => applyEditionLimiteeSelectionMode('simple')}
+                            android_ripple={{ color: '#39FF5A33' }}
+                        >
+                            <Text style={styles.editionModeOptionTitle}>⚡ Mode Simple</Text>
+                            <Text style={styles.editionModeOptionSub}>
+                                Un appui = ajout direct du produit au panier.
+                            </Text>
+                        </Pressable>
+
+                        <Pressable
+                            style={[styles.secondaryBtn, { marginTop: 2 }]}
+                            onPress={() => setEditionLimiteeModeModalVisible(false)}
+                        >
+                            <Text style={styles.secondaryBtnText}>Annuler</Text>
+                        </Pressable>
+                    </View>
+                </View>
+            </Modal>
+
             <Modal visible={payChoiceOpen} transparent animationType="fade">
                 <View style={styles.correctionBackdrop}>
                     <Pressable style={StyleSheet.absoluteFill} onPress={() => setPayChoiceOpen(false)} />
@@ -5668,6 +6982,96 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                     </>
                                 );
                             })()}
+                        </View>
+                    </View>
+                </View>
+            </Modal>
+
+            <Modal visible={paymentCorrectionModalVisible} transparent animationType="fade">
+                <View style={styles.correctionBackdrop}>
+                    <Pressable
+                        style={StyleSheet.absoluteFill}
+                        onPress={() => {
+                            if (!isSavingPaymentCorrection) {
+                                setPaymentCorrectionModalVisible(false);
+                            }
+                        }}
+                    />
+                    <View style={styles.correctionCard}>
+                        <Text style={styles.correctionTitle}>Modifier encaissement</Text>
+                        <Text style={styles.correctionSub}>
+                            Ticket #{selectedTicket?.ticketNumber ?? '-'} · actuel: {formatPaymentMethodLabel(selectedTicket?.paymentMethod ?? '')}
+                        </Text>
+
+                        <Text style={styles.productFormLabel}>Nouveau moyen</Text>
+                        <View style={styles.otherPayGrid}>
+                            {PAYMENT_METHOD_OPTIONS.map((method) => (
+                                <Pressable
+                                    key={method}
+                                    style={[
+                                        styles.otherPayOption,
+                                        { paddingVertical: 12 },
+                                        normalizePaymentMethodForCompare(paymentCorrectionMethod) === normalizePaymentMethodForCompare(method)
+                                        && { borderColor: COLORS.accent, borderWidth: 2 },
+                                    ]}
+                                    onPress={() => setPaymentCorrectionMethod(method)}
+                                    android_ripple={{ color: '#39FF5A33' }}
+                                >
+                                    <Text style={styles.otherPayOptionLabel}>{method}</Text>
+                                </Pressable>
+                            ))}
+                        </View>
+                        <View style={styles.otherPayGrid}>
+                            {PAYMENT_METHOD_MIX_PRESETS.map((preset) => (
+                                <Pressable
+                                    key={preset}
+                                    style={[
+                                        styles.otherPayOption,
+                                        { width: '48%', paddingVertical: 10 },
+                                        normalizePaymentMethodForCompare(paymentCorrectionMethod) === normalizePaymentMethodForCompare(preset)
+                                        && { borderColor: COLORS.accent, borderWidth: 2 },
+                                    ]}
+                                    onPress={() => setPaymentCorrectionMethod(preset)}
+                                    android_ripple={{ color: '#39FF5A33' }}
+                                >
+                                    <Text style={styles.otherPayOptionLabel}>{preset}</Text>
+                                </Pressable>
+                            ))}
+                        </View>
+                        <TextInput
+                            style={styles.input}
+                            value={paymentCorrectionMethod}
+                            onChangeText={setPaymentCorrectionMethod}
+                            placeholder="Ex: Carte / Titre Restaurant CB"
+                            placeholderTextColor={COLORS.muted}
+                        />
+
+                        <Text style={styles.productFormLabel}>Motif *</Text>
+                        <TextInput
+                            style={styles.input}
+                            value={paymentCorrectionReason}
+                            onChangeText={setPaymentCorrectionReason}
+                            placeholder="Ex: erreur de moyen d'encaissement"
+                            placeholderTextColor={COLORS.muted}
+                        />
+
+                        <View style={styles.correctionActions}>
+                            <Pressable
+                                style={[styles.secondaryBtn, isSavingPaymentCorrection && styles.primaryBtnDisabled]}
+                                onPress={() => setPaymentCorrectionModalVisible(false)}
+                                disabled={isSavingPaymentCorrection}
+                            >
+                                <Text style={styles.secondaryBtnText}>Fermer</Text>
+                            </Pressable>
+                            <Pressable
+                                style={[styles.primaryBtn, isSavingPaymentCorrection && styles.primaryBtnDisabled]}
+                                onPress={submitPaymentMethodCorrection}
+                                disabled={isSavingPaymentCorrection}
+                            >
+                                <Text style={styles.primaryBtnText}>
+                                    {isSavingPaymentCorrection ? 'Enregistrement…' : 'Confirmer correction'}
+                                </Text>
+                            </Pressable>
                         </View>
                     </View>
                 </View>
@@ -6056,11 +7460,15 @@ const PosScreen = ({ session, onLogout }: PosScreenProps) => {
                                         const state = await openCaisse(session.username);
                                         setCaisseOpenStateLocal(state);
                                         setOuvertureModalVisible(false);
-                                        const drawerResult = await openCashDrawer(runtimeSettings.cashPrinterUrl);
-                                        if (!drawerResult.ok) {
-                                            showToast(`Caisse ouverte, tiroir non déclenche (${drawerResult.message})`, 'error');
+                                        if (!settings.cashDrawerEnabled) {
+                                            showToast('Caisse ouverte ✓');
                                         } else {
-                                            showToast('Caisse ouverte + tiroir déclenché ✓');
+                                            const drawerResult = await openCashDrawer(runtimeSettings.cashPrinterUrl);
+                                            if (!drawerResult.ok) {
+                                                showToast(`Caisse ouverte, tiroir non déclenche (${drawerResult.message})`, 'error');
+                                            } else {
+                                                showToast('Caisse ouverte + tiroir déclenché ✓');
+                                            }
                                         }
                                     } catch {
                                         showToast('Erreur lors de l\'ouverture de la caisse.', 'error');
@@ -6586,20 +7994,39 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     productsGrid: {
-        paddingBottom: 30,
-        gap: 10,
+        paddingBottom: 36,
+        gap: 14,
     },
     productsRow: {
-        gap: 10,
+        gap: 14,
+    },
+    productCardWrap: {
+        marginBottom: 6,
+    },
+    productFamilySection: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginBottom: 6,
+    },
+    productFamilySectionLine: {
+        flex: 1,
+        height: 1,
+        backgroundColor: '#284033',
+    },
+    productFamilySectionTitle: {
+        color: '#8FCFA2',
+        fontSize: 10,
+        fontWeight: '800',
+        letterSpacing: 0.4,
+        textTransform: 'uppercase',
     },
     productCard: {
-        width: '23%',
-        backgroundColor: '#101010',
-        borderRadius: 12,
-        marginBottom: 10,
+        backgroundColor: '#0F0F0F',
+        borderRadius: 14,
         overflow: 'hidden',
         borderWidth: 1,
-        borderColor: '#1E1E1E',
+        borderColor: '#232323',
     },
     productCardSelected: {
         borderColor: COLORS.accent,
@@ -6607,31 +8034,32 @@ const styles = StyleSheet.create({
     },
     productImage: {
         width: '100%',
-        height: 78,
+        height: 92,
     },
     imageFallback: {
         backgroundColor: '#151515',
     },
     productName: {
         color: COLORS.text,
-        fontWeight: '600',
-        paddingHorizontal: 8,
-        paddingTop: 8,
+        fontWeight: '700',
+        paddingHorizontal: 10,
+        paddingTop: 10,
+        minHeight: 50,
     },
     productPrice: {
         color: COLORS.accent,
         fontWeight: '700',
-        paddingHorizontal: 8,
-        paddingBottom: 8,
+        paddingHorizontal: 10,
+        paddingBottom: 10,
         paddingTop: 4,
     },
     productSupplement: {
         color: COLORS.muted,
         fontSize: 11,
         fontWeight: '600',
-        paddingHorizontal: 8,
-        paddingBottom: 6,
-        marginTop: -4,
+        paddingHorizontal: 10,
+        paddingBottom: 8,
+        marginTop: -5,
     },
     panelTitle: {
         color: COLORS.text,
@@ -7317,6 +8745,13 @@ const styles = StyleSheet.create({
         padding: 8,
         gap: 2,
     },
+    closurePreviewPress: {
+        borderRadius: 6,
+        paddingVertical: 2,
+    },
+    closurePrintBtn: {
+        marginTop: 8,
+    },
     closureRowTitle: {
         color: COLORS.text,
         fontWeight: '700',
@@ -7541,6 +8976,18 @@ const styles = StyleSheet.create({
         paddingHorizontal: 8,
         minHeight: 48,
     },
+    ticketPaymentEditBtn: {
+        flex: 1,
+        backgroundColor: '#17232F',
+        borderWidth: 1,
+        borderColor: '#2C5A7A',
+        borderRadius: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 14,
+        paddingHorizontal: 8,
+        minHeight: 48,
+    },
     ticketActionBtnText: {
         color: COLORS.text,
         fontWeight: '700',
@@ -7587,6 +9034,33 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         borderColor: '#1F1F1F',
         gap: 12,
+    },
+    editionModeCard: {
+        maxWidth: 520,
+        gap: 10,
+    },
+    editionModeOption: {
+        backgroundColor: COLORS.cardSoft,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#273127',
+        paddingVertical: 14,
+        paddingHorizontal: 14,
+        gap: 4,
+    },
+    editionModeOptionMenu: {
+        borderColor: COLORS.accent,
+        backgroundColor: '#152018',
+    },
+    editionModeOptionTitle: {
+        color: COLORS.text,
+        fontWeight: '800',
+        fontSize: 14,
+    },
+    editionModeOptionSub: {
+        color: COLORS.muted,
+        fontSize: 12,
+        lineHeight: 17,
     },
     standbyCard: {
         width: '96%',

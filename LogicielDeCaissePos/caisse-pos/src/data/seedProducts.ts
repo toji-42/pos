@@ -204,8 +204,8 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   },
   {
     "slug": "croq_s",
-    "name": "Croq'S",
-    "price": 1.60,
+    "name": "Croq'S Beef",
+    "price": 3.00,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -214,8 +214,8 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   {
     "slug": "crown_original",
     "name": "Crown Original",
-    "price": 10.50,
-    "menuPrice": 10.50,
+    "price": 9.75,
+    "menuPrice": 9.75,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -224,8 +224,8 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   {
     "slug": "crown_spicy",
     "name": "Crown Spicy",
-    "price": 10.50,
-    "menuPrice": 10.50,
+    "price": 9.75,
+    "menuPrice": 9.75,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -233,9 +233,9 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   },
   {
     "slug": "le_plena",
-    "name": "Le Plena",
-    "price": 7.90,
-    "menuPrice": 7.90,
+    "name": "Plena",
+    "price": 7.95,
+    "menuPrice": 7.95,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -244,8 +244,8 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   {
     "slug": "racls_beef",
     "name": "Racl'S Beef",
-    "price": 9.90,
-    "menuPrice": 9.90,
+    "price": 5.95,
+    "menuPrice": 5.95,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -254,8 +254,8 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   {
     "slug": "racls_chicken",
     "name": "Racl'S Chicken",
-    "price": 9.90,
-    "menuPrice": 9.90,
+    "price": 5.95,
+    "menuPrice": 5.95,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -264,8 +264,8 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   {
     "slug": "stacks_beef",
     "name": "Stack'S Beef",
-    "price": 8.90,
-    "menuPrice": 8.90,
+    "price": 3.95,
+    "menuPrice": 3.95,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
@@ -274,12 +274,26 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   {
     "slug": "stacks_chicken",
     "name": "Stack'S Chicken",
-    "price": 8.90,
-    "menuPrice": 8.90,
+    "price": 3.95,
+    "menuPrice": 3.95,
     "category": "burgers",
     "sendToKitchen": true,
     "active": true,
     "imageKey": "stacks_chicken"
+  },
+
+  // ═══════════════════════════════════════════
+  // 🥗 SALADES
+  // ═══════════════════════════════════════════
+  {
+    "slug": "salade_simple",
+    "name": "Salade Simple",
+    "price": 7.95,
+    "menuPrice": 11.75,
+    "category": "salades",
+    "sendToKitchen": true,
+    "active": true,
+    "imageKey": ""
   },
 
   // ═══════════════════════════════════════════
@@ -332,7 +346,7 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   },
   {
     "slug": "sakitori_x3",
-    "name": "Sakitori x3",
+    "name": "Sakitori'S Spicy X3",
     "price": 4.95,
     "category": "snacks",
     "sendToKitchen": true,
@@ -341,7 +355,7 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   },
   {
     "slug": "sakitori_x6",
-    "name": "Sakitori x6",
+    "name": "Sakitori'S Spicy X6",
     "price": 8.95,
     "menuPrice": 8.50,
     "category": "snacks",
@@ -351,7 +365,7 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   },
   {
     "slug": "chicken_fil_s_thai",
-    "name": "Chicken Fil'S Thai",
+    "name": "Chicken Fil'S Thaï",
     "price": 4.95,
     "category": "snacks",
     "sendToKitchen": true,
@@ -645,7 +659,34 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
     "category": "desserts",
     "sendToKitchen": false,
     "active": true,
-    "imageKey": "cookie"
+    "imageKey": "double_cookies_glace"
+  },
+  {
+    "slug": "delice_glace",
+    "name": "Délice Glacé",
+    "price": 3.90,
+    "category": "desserts",
+    "sendToKitchen": false,
+    "active": true,
+    "imageKey": "delice_glace"
+  },
+  {
+    "slug": "sundae",
+    "name": "Sundae",
+    "price": 2.80,
+    "category": "desserts",
+    "sendToKitchen": false,
+    "active": true,
+    "imageKey": "sundae"
+  },
+  {
+    "slug": "cone_glace",
+    "name": "Cone Glacé",
+    "price": 1.00,
+    "category": "desserts",
+    "sendToKitchen": false,
+    "active": true,
+    "imageKey": "cone_glace"
   },
   {
     "slug": "muffin_choco",
@@ -721,12 +762,30 @@ export const DEFAULT_PRODUCTS: SeedProduct[] = [
   },
   {
     "slug": "le_mont_blanc_vanille",
-    "name": "Le Mont Blanc Vanille",
-    "price": 4.50,
+    "name": "Mont-Blanc Vanille",
+    "price": 3.90,
     "category": "desserts",
     "sendToKitchen": false,
     "active": true,
     "imageKey": "le_mont_blanc_vanille"
+  },
+  {
+    "slug": "mont_blanc_chocolat",
+    "name": "Mont-Blanc Chocolat",
+    "price": 3.90,
+    "category": "desserts",
+    "sendToKitchen": false,
+    "active": true,
+    "imageKey": "le_mont_blanc_chocolat"
+  },
+  {
+    "slug": "magic_waffle_pomme",
+    "name": "Magic Waffle Pomme",
+    "price": 2.50,
+    "category": "desserts",
+    "sendToKitchen": false,
+    "active": true,
+    "imageKey": ""
   },
   {
     "slug": "tronches_de_cake",

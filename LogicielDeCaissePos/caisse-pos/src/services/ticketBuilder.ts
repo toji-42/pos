@@ -9,7 +9,13 @@
  * puis envoyé à l'endpoint ePOS de l'imprimante Epson.
  */
 
-import { CartItem, OrderType, TaxLine } from '../types';
+import {
+  CartItem,
+  OrderType,
+  TaxLine,
+  TicketCustomization,
+  normalizeTicketCustomization,
+} from '../types';
 import { CLIENT_TICKET_LOGO } from './clientTicketLogo';
 
 // ── Config ticket ───────────────────────────────────────────────────────────
@@ -17,18 +23,11 @@ const W = 42; // largeur en caractères (80mm, police A optimisée)
 const SEP = '-'.repeat(W);
 const DOUBLE_SEP = '='.repeat(W);
 
-const BUSINESS = {
-  name: 'BURGER S DECINES',
-  address: '19 AVENUE FRANKLIN ROOSEVELT 69150 DECINES-CHARPIEU',
-  siret: 'SIRET : 53881582000013',
-  tvaIntra: 'TVA INTRA : FR00798980363',
-  tel: 'TEL : 04 72 82 02 97',
-};
-
 // ── TVA ─────────────────────────────────────────────────────────────────────
 const TAX_RATE_SUR_PLACE: Record<string, number> = {
   burgers: 0.1,
   snacks: 0.1,
+  salades: 0.1,
   desserts: 0.1,
   boissons: 0.1,
   accompagnements: 0.1,
@@ -38,6 +37,7 @@ const TAX_RATE_SUR_PLACE: Record<string, number> = {
 const TAX_RATE_A_EMPORTER: Record<string, number> = {
   burgers: 0.1,
   snacks: 0.1,
+  salades: 0.1,
   desserts: 0.1,
   boissons: 0.055,
   accompagnements: 0.1,
@@ -64,6 +64,65 @@ const centerStr = (s: string, w: number) => {
   const left = Math.floor((w - s.length) / 2);
   return ' '.repeat(left) + s + ' '.repeat(w - s.length - left);
 };
+const wrapText = (value: string, width: number): string[] => {
+  const safeWidth = Math.max(1, width);
+  const paragraphs = (value ?? '').split('\n');
+  const lines: string[] = [];
+
+  paragraphs.forEach((paragraph) => {
+    const cleaned = paragraph.replace(/\s+/g, ' ').trim();
+    if (!cleaned) {
+      lines.push('');
+      return;
+    }
+
+    let current = '';
+    const words = cleaned.split(' ');
+    words.forEach((word) => {
+      if (word.length > safeWidth) {
+        if (current) {
+          lines.push(current);
+          current = '';
+        }
+        let remaining = word;
+        while (remaining.length > safeWidth) {
+          lines.push(remaining.slice(0, safeWidth));
+          remaining = remaining.slice(safeWidth);
+        }
+        current = remaining;
+        return;
+      }
+
+      if (!current) {
+        current = word;
+        return;
+      }
+
+      if ((current.length + 1 + word.length) <= safeWidth) {
+        current += ` ${word}`;
+        return;
+      }
+
+      lines.push(current);
+      current = word;
+    });
+
+    if (current) {
+      lines.push(current);
+    }
+  });
+
+  return lines.length ? lines : [''];
+};
+
+const wrapWithPrefix = (prefix: string, content: string, width = W): string[] => {
+  const safePrefix = prefix ?? '';
+  const wrapped = wrapText(content, Math.max(1, width - safePrefix.length));
+  return wrapped.map((chunk, index) => (index === 0
+    ? `${safePrefix}${chunk}`
+    : `${' '.repeat(safePrefix.length)}${chunk}`));
+};
+
 const fmtPrice = (v: number) => v.toFixed(2);
 const fmtCurrency = (v: number) => `${v.toFixed(2)} EUR`;
 const fmtPercent = (v: number) => {
@@ -78,6 +137,12 @@ const twoCol = (left: string, right: string, width = W) => {
   return gap > 0 ? left + ' '.repeat(gap) + right : left + ' ' + right;
 };
 
+const twoColWrapped = (left: string, right: string, width = W): string[] => {
+  const line = twoCol(left, right, width);
+  if (line.length <= width) return [line];
+  return wrapWithPrefix(`${left} `, right, width);
+};
+
 const formatMenuDisplayName = (name: string) => {
   const trimmed = (name ?? '').trim();
   if (!trimmed) return 'MENU';
@@ -86,9 +151,11 @@ const formatMenuDisplayName = (name: string) => {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
   if (normalized.startsWith('menu ')) {
+    const baseLabel = trimmed.split(/\s*-\s*/)[0]?.trim();
+    if (baseLabel) return baseLabel;
     return trimmed;
   }
-  return `MENU ${trimmed}`;
+  return `Menu ${trimmed}`;
 };
 
 // ── XML ePOS helpers ────────────────────────────────────────────────────────
@@ -157,11 +224,24 @@ const COL_TOTAL = 7;
 
 const buildItemLine = (qty: number, name: string, unitPrice: number, taxCode: string, lineTotal: number): string => {
   const q = padL(String(qty), COL_QTY);
-  const n = padR(name.length > COL_NAME ? name.slice(0, COL_NAME) : name, COL_NAME);
+  const n = padR(name, COL_NAME);
   const p = padL(fmtPrice(unitPrice), COL_PU);
   const c = taxCode;
   const t = padL(fmtPrice(lineTotal), COL_TOTAL);
   return `${q} ${n} ${p}  ${c} ${t}`;
+};
+
+const buildItemLines = (qty: number, name: string, unitPrice: number, taxCode: string, lineTotal: number): string[] => {
+  const normalizedName = (name ?? '').replace(/\s+/g, ' ').trim() || '-';
+  const nameLines = wrapText(normalizedName, COL_NAME);
+  const firstLine = buildItemLine(qty, nameLines[0], unitPrice, taxCode, lineTotal);
+  if (nameLines.length === 1) return [firstLine];
+
+  const continuationPrefix = ' '.repeat(COL_QTY + 1);
+  const continuationLines = nameLines
+    .slice(1)
+    .map((line) => `${continuationPrefix}${padR(line, COL_NAME)}`);
+  return [firstLine, ...continuationLines];
 };
 
 const buildHeaderLine = (): string => {
@@ -189,6 +269,7 @@ export type TicketPayload = {
   orderType?: OrderType;
   ticketNumber?: number | string;
   isDuplicate?: boolean;
+  ticketCustomization?: TicketCustomization;
 };
 
 const paymentMethodLabel = (value?: string) => {
@@ -219,7 +300,11 @@ const shouldHidePaymentLineForVoucherSurplus = (value?: string) => {
 };
 
 const isKitchenTicketProduct = (product: CartItem['product']) =>
-  product.sendToKitchen && (product.category === 'burgers' || product.category === 'snacks');
+  product.sendToKitchen
+  && (product.category === 'burgers' || product.category === 'snacks' || product.category === 'salades');
+
+const kitchenItemLabel = (product: CartItem['product']) =>
+  product.name;
 
 // ── Génération du ticket caisse ─────────────────────────────────────────────
 
@@ -242,6 +327,16 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
   const orderType = payload.orderType ?? 'sur_place';
   const orderTypeLabel = orderType === 'a_emporter' ? 'A EMPORTER' : 'SUR PLACE';
   const ticketNum = payload.ticketNumber ?? now.getTime().toString().slice(-6);
+  const customization = normalizeTicketCustomization(payload.ticketCustomization);
+  const bannerFeed = customization.compactMode ? 1 : 2;
+  const finalFeed = customization.compactMode ? 2 : 4;
+  const headerLines = [
+    customization.businessName,
+    customization.businessAddress,
+    customization.businessSiret,
+    customization.businessTvaIntra,
+    customization.businessPhone,
+  ].filter(Boolean);
 
   const xmlParts: string[] = [];
   const textParts: string[] = []; // version texte brut pour archivage
@@ -249,25 +344,27 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
   // ═══════════════════════════════════════════════════════════════════════════
   // 1. EN-TÊTE
   // ═══════════════════════════════════════════════════════════════════════════
-  xmlParts.push(
-    `<image align="center" width="${CLIENT_TICKET_LOGO.width}" height="${CLIENT_TICKET_LOGO.height}" mode="${CLIENT_TICKET_LOGO.mode}" color="color_1">${CLIENT_TICKET_LOGO.dataBase64}</image>`,
-  );
-  xmlParts.push(feed(1));
-  xmlParts.push(txt(BUSINESS.name, { align: 'center', bold: true, dh: true }));
-  xmlParts.push(txt(BUSINESS.address, { align: 'center' }));
-  xmlParts.push(txt(BUSINESS.siret, { align: 'center' }));
-  xmlParts.push(txt(BUSINESS.tvaIntra, { align: 'center' }));
-  xmlParts.push(txt(BUSINESS.tel, { align: 'center' }));
-  xmlParts.push(txt('', { align: 'center' }));
-
-  textParts.push(
-    centerStr(BUSINESS.name, W),
-    centerStr(BUSINESS.address, W),
-    centerStr(BUSINESS.siret, W),
-    centerStr(BUSINESS.tvaIntra, W),
-    centerStr(BUSINESS.tel, W),
-    '',
-  );
+  if (customization.showLogo) {
+    xmlParts.push(
+      `<image align="center" width="${CLIENT_TICKET_LOGO.width}" height="${CLIENT_TICKET_LOGO.height}" mode="${CLIENT_TICKET_LOGO.mode}" color="color_1">${CLIENT_TICKET_LOGO.dataBase64}</image>`,
+    );
+    xmlParts.push(feed(1));
+  }
+  headerLines.forEach((headerLine, headerIndex) => {
+    wrapText(headerLine, W).forEach((line, lineIndex) => {
+      const isMainLine = headerIndex === 0 && lineIndex === 0;
+      xmlParts.push(txt(line, {
+        align: 'center',
+        ...(isMainLine ? { dh: true } : {}),
+        ...((isMainLine || customization.headerBold) ? { bold: true } : {}),
+      }));
+      textParts.push(centerStr(line, W));
+    });
+  });
+  if (headerLines.length > 0) {
+    xmlParts.push(txt('', { align: 'center' }));
+    textParts.push('');
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 2. MODE DE SERVICE
@@ -275,25 +372,28 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
   // Le bandeau inversé en double-hauteur prend 2x l'espace vertical.
   // On ajoute un feed après pour ne pas chevaucher la ligne suivante.
   const serviceLabel = ` ${orderTypeLabel} `;
-  xmlParts.push(txt(centerStr(serviceLabel, W), { align: 'center', bold: true, dh: true, reverse: true }));
-  xmlParts.push(feed(2));
+  xmlParts.push(txt(serviceLabel, { align: 'center', bold: true, dh: true, reverse: true }));
+  xmlParts.push(feed(bannerFeed));
 
   textParts.push(centerStr(`*** ${orderTypeLabel} ***`, W), '');
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 3. MÉTADONNÉES
   // ═══════════════════════════════════════════════════════════════════════════
-  const metaLines = [
+  const metaLines: string[] = [
     `Date: ${dateStr}  Heure: ${timeStr}`,
     `Commande ${ticketNum}`,
-    `Vendeur: ${payload.seller}`,
   ];
-  if (payload.tableLabel) {
-    metaLines.splice(2, 0, `Table: ${payload.tableLabel}`);
+  if (customization.showTable && payload.tableLabel) {
+    metaLines.push(`Table: ${payload.tableLabel}`);
+  }
+  if (customization.showSeller && payload.seller) {
+    metaLines.push(`Vendeur: ${payload.seller}`);
   }
 
-  xmlParts.push(txtLines(metaLines, { align: 'center' }));
-  textParts.push(...metaLines.map((line) => centerStr(line, W)));
+  const wrappedMetaLines = metaLines.flatMap((line) => wrapText(line, W));
+  xmlParts.push(txtLines(wrappedMetaLines, { align: 'center' }));
+  textParts.push(...wrappedMetaLines.map((line) => centerStr(line, W)));
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 4. CORPS DE COMMANDE
@@ -317,26 +417,29 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
     const lineTotal = item.product.price * item.quantity;
     const unitPrice = item.product.price;
 
-    const displayName = isMenu ? formatMenuDisplayName(item.product.name) : item.product.name;
-    const line = buildItemLine(item.quantity, displayName, unitPrice, code, lineTotal);
-
-    xmlParts.push(txt(line, { align: 'left' }));
-    itemLines.push(line);
+    const displayName = isMenu ? 'Menu' : item.product.name;
+    const lines = buildItemLines(item.quantity, displayName, unitPrice, code, lineTotal);
+    lines.forEach((line) => {
+      xmlParts.push(txt(line, { align: 'left' }));
+      itemLines.push(line);
+    });
 
     // Sous-éléments d'un menu (en retrait, sans prix)
     if (isMenu && item.menuItems) {
       item.menuItems.forEach((mi) => {
-        const subLine = `     ${item.quantity}x ${mi.product.name}`;
-        xmlParts.push(txt(subLine, { align: 'left' }));
-        itemLines.push(subLine);
+        wrapWithPrefix(`     x${item.quantity} `, mi.product.name, W).forEach((subLine) => {
+          xmlParts.push(txt(subLine, { align: 'left' }));
+          itemLines.push(subLine);
+        });
       });
     }
 
     // Note spécifique à cet article
     if (item.note) {
-      const noteLine = `  NOTE MODIF: ${item.note}`;
-      xmlParts.push(txt(noteLine, { align: 'left', bold: true }));
-      itemLines.push(noteLine);
+      wrapWithPrefix('  NOTE MODIF: ', item.note, W).forEach((noteLine) => {
+        xmlParts.push(txt(noteLine, { align: 'left', bold: true }));
+        itemLines.push(noteLine);
+      });
     }
   });
 
@@ -352,15 +455,17 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
   const taxLines = payload.taxLines ?? [];
 
   // Total HT
-  const htLine = twoCol('Total HT :', fmtCurrency(totalHt));
-  xmlParts.push(txt(htLine, { align: 'left' }));
-  textParts.push(htLine);
+  twoColWrapped('Total HT :', fmtCurrency(totalHt)).forEach((htLine) => {
+    xmlParts.push(txt(htLine, { align: 'left' }));
+    textParts.push(htLine);
+  });
 
   // Détail TVA par taux (résumé inline)
   taxLines.forEach((tl) => {
-    const tvaLine = twoCol(`  TVA ${(tl.rate * 100).toFixed(1)}% :`, fmtCurrency(tl.tax));
-    xmlParts.push(txt(tvaLine, { align: 'left' }));
-    textParts.push(tvaLine);
+    twoColWrapped(`  TVA ${(tl.rate * 100).toFixed(1)}% :`, fmtCurrency(tl.tax)).forEach((tvaLine) => {
+      xmlParts.push(txt(tvaLine, { align: 'left' }));
+      textParts.push(tvaLine);
+    });
   });
 
   // Séparateur double
@@ -368,9 +473,10 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
   textParts.push(DOUBLE_SEP);
 
   // TOTAL TTC — gras + double hauteur
-  const ttcLine = twoCol('TOTAL TTC :', fmtCurrency(payload.total));
-  xmlParts.push(txt(ttcLine, { align: 'left', bold: true, dh: true }));
-  textParts.push(ttcLine);
+  twoColWrapped('TOTAL TTC :', fmtCurrency(payload.total)).forEach((ttcLine, idx) => {
+    xmlParts.push(txt(ttcLine, { align: 'left', bold: true, ...(idx === 0 ? { dh: true } : {}) }));
+    textParts.push(ttcLine);
+  });
 
   // Séparateur double
   xmlParts.push(txt(DOUBLE_SEP, { align: 'left' }));
@@ -378,9 +484,10 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
 
   // Remise éventuelle
   if (payload.discountAmount && payload.discountAmount > 0) {
-    const discLine = twoCol('Remise :', `-${fmtCurrency(payload.discountAmount)}`);
-    xmlParts.push(txt(discLine, { align: 'left' }));
-    textParts.push(discLine);
+    twoColWrapped('Remise :', `-${fmtCurrency(payload.discountAmount)}`).forEach((discLine) => {
+      xmlParts.push(txt(discLine, { align: 'left' }));
+      textParts.push(discLine);
+    });
   }
 
   // Majoration nuit éventuelle
@@ -388,22 +495,24 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
     const surchargeLabel = payload.surchargePercent && payload.surchargePercent > 0
       ? `Majoration nuit (${fmtPercent(payload.surchargePercent)}) :`
       : 'Majoration nuit :';
-    const surchLine = twoCol(surchargeLabel, `+${fmtCurrency(payload.surchargeAmount)}`);
-    xmlParts.push(txt(surchLine, { align: 'left', bold: true }));
-    textParts.push(surchLine);
+    twoColWrapped(surchargeLabel, `+${fmtCurrency(payload.surchargeAmount)}`).forEach((surchLine) => {
+      xmlParts.push(txt(surchLine, { align: 'left', bold: true }));
+      textParts.push(surchLine);
+    });
   }
 
   // Mode de paiement
-  if (!shouldHidePaymentLineForVoucherSurplus(payload.paymentMethod)) {
-    const payLine = twoCol('Paiement :', paymentMethodLabel(payload.paymentMethod));
-    xmlParts.push(txt(payLine, { align: 'left', bold: true }));
-    textParts.push(payLine);
+  if (customization.showPaymentLine && !shouldHidePaymentLineForVoucherSurplus(payload.paymentMethod)) {
+    twoColWrapped('Paiement :', paymentMethodLabel(payload.paymentMethod)).forEach((payLine) => {
+      xmlParts.push(txt(payLine, { align: 'left', bold: true }));
+      textParts.push(payLine);
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 6. TABLEAU TVA RÉCAPITULATIF
   // ═══════════════════════════════════════════════════════════════════════════
-  if (taxLines.length > 0) {
+  if (customization.showTaxTable && taxLines.length > 0) {
     xmlParts.push(txt('', {}));
     xmlParts.push(txt(SEP, { align: 'left' }));
     textParts.push('', SEP);
@@ -444,14 +553,24 @@ export const generateCashTicketXml = (payload: TicketPayload): { xml: string; te
     textParts.push('', '*** DUPLICATA ***');
   }
 
-  xmlParts.push(txt('Bon appetit !', { align: 'center' }));
-  textParts.push('', 'Bon appetit !');
+  if (customization.footerLine1) {
+    xmlParts.push(txt(customization.footerLine1, {
+      align: 'center',
+      ...(customization.footerBold ? { bold: true } : {}),
+    }));
+    textParts.push('', customization.footerLine1);
+  }
 
-  xmlParts.push(txt('Merci de votre visite !', { align: 'center' }));
-  textParts.push('Merci de votre visite !');
+  if (customization.footerLine2) {
+    xmlParts.push(txt(customization.footerLine2, {
+      align: 'center',
+      ...(customization.footerBold ? { bold: true } : {}),
+    }));
+    textParts.push(customization.footerLine2);
+  }
 
   // Feed + coupe
-  xmlParts.push(feed(4));
+  xmlParts.push(feed(finalFeed));
   xmlParts.push(cut());
 
   return {
@@ -478,6 +597,9 @@ export const generateServiceTicketXml = (payload: TicketPayload): { xml: string;
   const orderType = payload.orderType ?? 'sur_place';
   const orderTypeLabel = orderType === 'a_emporter' ? 'A EMPORTER' : 'SUR PLACE';
   const ticketNum = payload.ticketNumber ?? now.getTime().toString().slice(-6);
+  const customization = normalizeTicketCustomization(payload.ticketCustomization);
+  const bannerFeed = customization.compactMode ? 1 : 2;
+  const finalFeed = customization.compactMode ? 2 : 4;
 
   const xmlParts: string[] = [];
   const textParts: string[] = [];
@@ -488,30 +610,34 @@ export const generateServiceTicketXml = (payload: TicketPayload): { xml: string;
   textParts.push('BON PREPA SALLE', '');
 
   // ── Mode service (bandeau inversé) ──
-  xmlParts.push(txt(centerStr(` ${orderTypeLabel} `, W), { align: 'center', bold: true, dh: true, reverse: true }));
-  xmlParts.push(feed(2));
+  xmlParts.push(txt(` ${orderTypeLabel} `, { align: 'center', bold: true, dh: true, reverse: true }));
+  xmlParts.push(feed(bannerFeed));
   textParts.push(centerStr(`*** ${orderTypeLabel} ***`, W), '');
 
   // ── Numéro commande bien visible ──
   const numLabel = `Commande ${ticketNum}`;
-  xmlParts.push(txt(centerStr(numLabel, W), { align: 'center', bold: true, dh: true, dw: true }));
+  xmlParts.push(txt(numLabel, { align: 'center', bold: true, dh: true, dw: true }));
   xmlParts.push(feed(1));
   textParts.push(centerStr(`>>> ${numLabel} <<<`, W), '');
 
   // ── Table (grosse si présente) ──
-  if (payload.tableLabel) {
-    xmlParts.push(txt(`Table: ${payload.tableLabel}`, { align: 'center', bold: true, dh: true }));
+  if (customization.showTable && payload.tableLabel) {
+    wrapText(`Table: ${payload.tableLabel}`, W).forEach((line, idx) => {
+      xmlParts.push(txt(line, { align: 'center', bold: true, ...(idx === 0 ? { dh: true } : {}) }));
+      textParts.push(centerStr(line, W));
+    });
     xmlParts.push(feed(1));
-    textParts.push(`Table: ${payload.tableLabel}`, '');
+    textParts.push('');
   }
 
   // ── Métadonnées ──
-  const meta: string[] = [
-    twoCol(`Date: ${dateStr}`, `Heure: ${timeStr}`),
-    `Serveur: ${payload.seller}`,
-  ];
-  xmlParts.push(txtLines(meta, { align: 'left' }));
-  textParts.push(...meta);
+  const meta: string[] = [twoCol(`Date: ${dateStr}`, `Heure: ${timeStr}`)];
+  if (customization.showSeller && payload.seller) {
+    meta.push(`Serveur: ${payload.seller}`);
+  }
+  const wrappedMeta = meta.flatMap((line) => wrapText(line, W));
+  xmlParts.push(txtLines(wrappedMeta, { align: 'left' }));
+  textParts.push(...wrappedMeta);
 
   xmlParts.push(txt(SEP, { align: 'left' }));
   textParts.push(SEP);
@@ -525,34 +651,39 @@ export const generateServiceTicketXml = (payload: TicketPayload): { xml: string;
       const salleSubItems = item.menuItems?.filter((mi) => mi.product.sendToSalle !== false) ?? [];
       if (salleSubItems.length > 0 || item.product.sendToSalle !== false) {
         hasSalleItems = true;
-        const menuLine = `${item.quantity}x ${formatMenuDisplayName(item.product.name)}`;
-        xmlParts.push(txt(menuLine, { align: 'left', bold: true }));
-        textParts.push(menuLine);
+        wrapWithPrefix(`${item.quantity}x `, formatMenuDisplayName(item.product.name), W).forEach((menuLine) => {
+          xmlParts.push(txt(menuLine, { align: 'left', bold: true }));
+          textParts.push(menuLine);
+        });
 
         salleSubItems.forEach((mi) => {
-          const subLine = `   - ${mi.product.name}`;
-          xmlParts.push(txt(subLine, { align: 'left' }));
-          textParts.push(subLine);
+          wrapWithPrefix('   - ', mi.product.name, W).forEach((subLine) => {
+            xmlParts.push(txt(subLine, { align: 'left' }));
+            textParts.push(subLine);
+          });
         });
 
         // Note spécifique à ce menu
         if (item.note) {
-          const noteLine = `  NOTE MODIF: ${item.note}`;
-          xmlParts.push(txt(noteLine, { align: 'left', bold: true }));
-          textParts.push(noteLine);
+          wrapWithPrefix('  NOTE MODIF: ', item.note, W).forEach((noteLine) => {
+            xmlParts.push(txt(noteLine, { align: 'left', bold: true }));
+            textParts.push(noteLine);
+          });
         }
       }
     } else if (item.product.sendToSalle !== false) {
       hasSalleItems = true;
-      const line = `${item.quantity}x ${item.product.name}`;
-      xmlParts.push(txt(line, { align: 'left', bold: true }));
-      textParts.push(line);
+      wrapWithPrefix(`${item.quantity}x `, item.product.name, W).forEach((line) => {
+        xmlParts.push(txt(line, { align: 'left', bold: true }));
+        textParts.push(line);
+      });
 
       // Note spécifique à cet article
       if (item.note) {
-        const noteLine = `  NOTE MODIF: ${item.note}`;
-        xmlParts.push(txt(noteLine, { align: 'left', bold: true }));
-        textParts.push(noteLine);
+        wrapWithPrefix('  NOTE MODIF: ', item.note, W).forEach((noteLine) => {
+          xmlParts.push(txt(noteLine, { align: 'left', bold: true }));
+          textParts.push(noteLine);
+        });
       }
     }
   });
@@ -566,13 +697,30 @@ export const generateServiceTicketXml = (payload: TicketPayload): { xml: string;
 
   // ── Note ──
   if (payload.note) {
-    xmlParts.push(txt(`NOTE: ${payload.note}`, { align: 'left', bold: true, dh: true }));
-    textParts.push(`NOTE: ${payload.note}`);
+    wrapWithPrefix('NOTE: ', payload.note, W).forEach((line, idx) => {
+      xmlParts.push(txt(line, { align: 'left', bold: true, ...(idx === 0 ? { dh: true } : {}) }));
+      textParts.push(line);
+    });
     xmlParts.push(txt('', {}));
     textParts.push('');
   }
 
-  xmlParts.push(feed(4));
+  if (customization.footerLine1) {
+    xmlParts.push(txt(customization.footerLine1, {
+      align: 'center',
+      ...(customization.footerBold ? { bold: true } : {}),
+    }));
+    textParts.push(customization.footerLine1);
+  }
+  if (customization.footerLine2) {
+    xmlParts.push(txt(customization.footerLine2, {
+      align: 'center',
+      ...(customization.footerBold ? { bold: true } : {}),
+    }));
+    textParts.push(customization.footerLine2);
+  }
+
+  xmlParts.push(feed(finalFeed));
   xmlParts.push(cut());
 
   return {
@@ -589,6 +737,9 @@ export const generateKitchenTicketXml = (payload: TicketPayload): { xml: string;
   const orderType = payload.orderType ?? 'sur_place';
   const orderTypeLabel = orderType === 'a_emporter' ? 'A EMPORTER' : 'SUR PLACE';
   const ticketNum = payload.ticketNumber ?? now.getTime().toString().slice(-6);
+  const customization = normalizeTicketCustomization(payload.ticketCustomization);
+  const bannerFeed = customization.compactMode ? 1 : 2;
+  const finalFeed = customization.compactMode ? 2 : 4;
 
   const xmlParts: string[] = [];
   const textParts: string[] = [];
@@ -599,9 +750,9 @@ export const generateKitchenTicketXml = (payload: TicketPayload): { xml: string;
   textParts.push('BON PREPA CUISINE', '');
 
   // Mode service
-  xmlParts.push(txt(centerStr(` ${orderTypeLabel} `, W), { align: 'center', bold: true, dh: true, reverse: true }));
+  xmlParts.push(txt(` ${orderTypeLabel} `, { align: 'center', bold: true, dh: true, reverse: true }));
   // Double-height reverse banner occupies 2 vertical lines — add feed to avoid overlap
-  xmlParts.push(feed(2));
+  xmlParts.push(feed(bannerFeed));
   textParts.push(centerStr(`*** ${orderTypeLabel} ***`, W), '');
 
   // Numero de commande pour faire le lien avec le ticket de salle
@@ -611,14 +762,17 @@ export const generateKitchenTicketXml = (payload: TicketPayload): { xml: string;
   textParts.push(orderNumberLine, '');
 
   // Métadonnées
-  const meta: string[] = [
-    `Heure: ${timeStr}`,
-    payload.tableLabel ? `Table: ${payload.tableLabel}` : '',
-    `Vendeur: ${payload.seller}`,
-  ].filter(Boolean);
+  const meta: string[] = [`Heure: ${timeStr}`];
+  if (customization.showTable && payload.tableLabel) {
+    meta.push(`Table: ${payload.tableLabel}`);
+  }
+  if (customization.showSeller && payload.seller) {
+    meta.push(`Vendeur: ${payload.seller}`);
+  }
 
-  xmlParts.push(txtLines(meta, { align: 'left' }));
-  textParts.push(...meta);
+  const wrappedMeta = meta.flatMap((line) => wrapText(line, W));
+  xmlParts.push(txtLines(wrappedMeta, { align: 'left' }));
+  textParts.push(...wrappedMeta);
 
   xmlParts.push(txt(SEP, { align: 'left' }));
   textParts.push(SEP);
@@ -627,38 +781,38 @@ export const generateKitchenTicketXml = (payload: TicketPayload): { xml: string;
   let hasKitchenItems = false;
   payload.cartItems.forEach((item) => {
     if (item.kind === 'menu' && item.menuItems?.length) {
-      // Pour un menu, on affiche les sous-éléments cuisine
+      // Pour un menu, on n'affiche que les articles cuisine (sans ligne "MENU")
       const kitchenSubs = item.menuItems.filter((mi) => isKitchenTicketProduct(mi.product));
       if (kitchenSubs.length > 0) {
         hasKitchenItems = true;
-        const menuLine = `${item.quantity}x ${formatMenuDisplayName(item.product.name)}`;
-        xmlParts.push(txt(menuLine, { align: 'left', bold: true, dh: true }));
-        textParts.push(menuLine);
-
         kitchenSubs.forEach((mi) => {
-          const subLine = `   - ${mi.product.name}`;
-          xmlParts.push(txt(subLine, { align: 'left', dh: true }));
-          textParts.push(subLine);
+          wrapWithPrefix(`${item.quantity}x `, kitchenItemLabel(mi.product), W).forEach((line) => {
+            xmlParts.push(txt(line, { align: 'left', bold: true, dh: true }));
+            textParts.push(line);
+          });
         });
 
         // Note spécifique à ce menu
         if (item.note) {
-          const noteLine = `  NOTE MODIF: ${item.note}`;
-          xmlParts.push(txt(noteLine, { align: 'left', bold: true, dh: true }));
-          textParts.push(noteLine);
+          wrapWithPrefix('  NOTE MODIF: ', item.note, W).forEach((noteLine) => {
+            xmlParts.push(txt(noteLine, { align: 'left', bold: true, dh: true }));
+            textParts.push(noteLine);
+          });
         }
       }
     } else if (isKitchenTicketProduct(item.product)) {
       hasKitchenItems = true;
-      const line = `${item.quantity}x ${item.product.name}`;
-      xmlParts.push(txt(line, { align: 'left', bold: true, dh: true }));
-      textParts.push(line);
+      wrapWithPrefix(`${item.quantity}x `, kitchenItemLabel(item.product), W).forEach((line) => {
+        xmlParts.push(txt(line, { align: 'left', bold: true, dh: true }));
+        textParts.push(line);
+      });
 
       // Note spécifique à cet article
       if (item.note) {
-        const noteLine = `  NOTE MODIF: ${item.note}`;
-        xmlParts.push(txt(noteLine, { align: 'left', bold: true, dh: true }));
-        textParts.push(noteLine);
+        wrapWithPrefix('  NOTE MODIF: ', item.note, W).forEach((noteLine) => {
+          xmlParts.push(txt(noteLine, { align: 'left', bold: true, dh: true }));
+          textParts.push(noteLine);
+        });
       }
     }
   });
@@ -670,13 +824,22 @@ export const generateKitchenTicketXml = (payload: TicketPayload): { xml: string;
   xmlParts.push(txt(SEP, { align: 'left' }));
   textParts.push(SEP);
 
-  // Note
-  if (payload.note) {
-    xmlParts.push(txt(`NOTE: ${payload.note}`, { align: 'left', bold: true }));
-    textParts.push(`NOTE: ${payload.note}`);
+  if (customization.footerLine1) {
+    xmlParts.push(txt(customization.footerLine1, {
+      align: 'center',
+      ...(customization.footerBold ? { bold: true } : {}),
+    }));
+    textParts.push(customization.footerLine1);
+  }
+  if (customization.footerLine2) {
+    xmlParts.push(txt(customization.footerLine2, {
+      align: 'center',
+      ...(customization.footerBold ? { bold: true } : {}),
+    }));
+    textParts.push(customization.footerLine2);
   }
 
-  xmlParts.push(feed(4));
+  xmlParts.push(feed(finalFeed));
   xmlParts.push(cut());
 
   return {

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Logiciel de Caisse",
+    "name": "Bill",
     "slug": "caisse-pos",
     "version": "1.0.0",
     "orientation": "landscape",

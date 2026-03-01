@@ -88,8 +88,9 @@ export const printUsbTicketByUrl = async (
   if (deviceId === null) {
     return { ok: false, message: 'URL imprimante USB invalide.' };
   }
-  const content = ticketText.trim();
-  if (!content) {
+  // Keep leading spaces for centered headers (e.g. first line on cash ticket).
+  const content = ticketText.replace(/\r\n/g, '\n').trimEnd();
+  if (!content.trim()) {
     return { ok: false, message: 'Ticket vide pour impression USB.' };
   }
   if (!isUsbPrinterSupported() || !usbModule) {
